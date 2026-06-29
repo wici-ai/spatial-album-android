@@ -1,0 +1,17 @@
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore.properties
+.idea/
+*.iml
+captures/
+.DS_Store
+.kotlin/
+.cxx/
+
+# Large local stress-test assets should be kept outside git.
+app/src/main/assets/sharp-phone-photo-man-350k.ply

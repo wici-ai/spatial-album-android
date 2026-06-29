@@ -1,0 +1,2400 @@
+package com.wici.androidalbumdemo
+
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.app.Activity
+import android.content.res.ColorStateList
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ImageDecoder
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
+import android.net.Uri
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.provider.MediaStore
+import android.text.TextUtils
+import android.util.Base64
+import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.animation.LinearInterpolator
+import android.widget.AbsListView
+import android.widget.BaseAdapter
+import android.widget.FrameLayout
+import android.widget.GridView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+class MainActivity : Activity() {
+    private var glView: SplatGlView? = null
+    private lateinit var renderStatus: TextView
+    private lateinit var overlay: ImageView
+    private lateinit var generateButton: LinearLayout
+    private lateinit var generateLabel: TextView
+    private lateinit var generateSpinner: ProgressBar
+    private val networkExecutor = Executors.newSingleThreadExecutor()
+    private var assetName: String = "brush-clean-noshr-10k.ply"
+    private var latestCapture: ReleaseCapture? = null
+    private var difixDataUrl: String? = null
+    private var fluxDataUrl: String? = null
+    private var finalBitmap: Bitmap? = null
+    private var currentViewerPhoto: AlbumPhoto? = null
+    private var displayMode = DisplayMode.RAW
+    private var difixBusy = false
+    private var fluxBusy = false
+    private var releaseCaptureEnabled = true
+    private var postPassEnabled = true
+    private var streamDensityOverride: String? = null
+    private var footprintScaleOverride: Float? = null
+    private var splatCacheMaxBytesOverride: Long? = null
+    private var viewerVisible = false
+    private var previewRequestSerial = 0
+    private var previewEnabled = false
+    private var albumGrid: GridView? = null
+    private var albumAdapter: AlbumGridAdapter? = null
+    private var albumStatus: TextView? = null
+    private var albumActionButton: TextView? = null
+    private var galleryRequestSerial = 0
+    private var cascadeRunSerial = 0
+    private val previewHandler = Handler(Looper.getMainLooper())
+    private val thumbnailCache = mutableMapOf<String, Bitmap>()
+    private var albumPhotos: List<AlbumPhoto> = emptyList()
+    private val importedPhotos = mutableListOf<AlbumPhoto>()
+    private val removedCuratedPhotoIds = mutableSetOf<String>()
+    private val localSourceDataUrlCache = mutableMapOf<String, String>()
+    private var nextImportedOrdinal = 1
+    private var albumEditMode = false
+    private val interBase: Typeface by lazy { resources.getFont(R.font.inter_variable) }
+    private val spaceGroteskBase: Typeface by lazy { resources.getFont(R.font.space_grotesk_variable) }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.setBackgroundDrawable(ColorDrawable(COLOR_CANVAS))
+        window.statusBarColor = COLOR_CANVAS
+        window.navigationBarColor = COLOR_CANVAS
+        removedCuratedPhotoIds.addAll(loadRemovedCuratedPhotoIds())
+
+        releaseCaptureEnabled = !intent.getBooleanExtra("disableReleaseCapture", false)
+        postPassEnabled = !intent.getBooleanExtra("disablePostPass", false)
+        streamDensityOverride = intent.getStringExtra("streamDensity")
+            ?.takeIf { it.isNotBlank() }
+        footprintScaleOverride = if (intent.hasExtra("footprintScale")) {
+            intent.getFloatExtra("footprintScale", Float.NaN)
+                .takeIf { it.isFinite() && it > 0f }
+        } else {
+            null
+        }
+        splatCacheMaxBytesOverride = if (intent.hasExtra("splatCacheMaxBytes")) {
+            intent.getLongExtra("splatCacheMaxBytes", 0L).takeIf { it > 0L }
+        } else {
+            null
+        }
+        val requestedAsset = intent.getStringExtra("asset")
+        if (requestedAsset != null) {
+            val requestedPhotoId = intent.getStringExtra("photoId")
+                ?.takeIf { it.isNotBlank() }
+                ?: photoIdForAsset(requestedAsset)
+            val dims = sourceDimsFromIntent() ?: legacySourceDims(requestedPhotoId)
+            val photo = albumPhotos.firstOrNull { it.splatAsset == requestedAsset }
+                ?: AlbumPhoto(
+                    photoId = requestedPhotoId,
+                    thumbnailUrl = absoluteGalleryUrl("/thumbnail?photoId=${Uri.encode(requestedPhotoId)}"),
+                    hasOrbit = true,
+                    hasSplat = true,
+                    sourceWidth = dims?.first,
+                    sourceHeight = dims?.second,
+                    camFx = intentPositiveFloat("camFx"),
+                    camFy = intentPositiveFloat("camFy"),
+                    camCx = intentPositiveFloat("camCx"),
+                    camCy = intentPositiveFloat("camCy"),
+                    sourceUrl = absoluteGalleryUrl("/source?photoId=${Uri.encode(requestedPhotoId)}"),
+                    splatStreamUrl = absoluteGalleryUrl("/splat_stream?photoId=${Uri.encode(requestedPhotoId)}")
+                )
+            showViewer(photo)
+        } else {
+            showAlbum()
+        }
+    }
+
+    private fun showAlbum() {
+        viewerVisible = false
+        previewEnabled = false
+        glView?.shutdown()
+        glView?.onPause()
+        glView = null
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        currentViewerPhoto = null
+        albumEditMode = false
+        albumActionButton = null
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(COLOR_CANVAS)
+            setPadding(dp(12), dp(22), dp(12), 0)
+            setOnClickListener {
+                if (albumEditMode) exitAlbumEditMode()
+            }
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(18))
+        }
+        val headerCopy = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        headerCopy.addView(
+            TextView(this).apply {
+                text = "Spatial Album"
+                setTextColor(COLOR_INK)
+                textSize = 32f
+                typeface = spaceGrotesk(700)
+                isSingleLine = true
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        albumStatus = TextView(this).apply {
+            text = if (albumPhotos.isEmpty()) "LOADING GALLERY" else momentCountText()
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 11f
+            typeface = inter(600)
+            includeFontPadding = false
+            setPadding(0, dp(4), 0, 0)
+        }
+        headerCopy.addView(albumStatus, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        header.addView(headerCopy, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val previewToggle = TextView(this).apply {
+            text = "3D Preview"
+            textSize = 13f
+            typeface = inter(600)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            minHeight = dp(38)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                updateOrbitPreviews(!previewEnabled)
+                stylePreviewToggle(this, previewEnabled)
+            }
+        }
+        stylePreviewToggle(previewToggle, false)
+        albumActionButton = previewToggle
+        header.addView(previewToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
+        root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val adapter = AlbumGridAdapter()
+        albumAdapter = adapter
+        val grid = GridView(this).apply {
+            numColumns = 3
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            horizontalSpacing = dp(10)
+            verticalSpacing = dp(12)
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(28))
+            selector = ColorDrawable(Color.TRANSPARENT)
+            this.adapter = adapter
+            setRecyclerListener { view -> stopCellPreview(view) }
+            setOnItemLongClickListener { _, _, position, _ ->
+                val photo = adapter.photoAt(position)
+                if (photo != null) {
+                    enterAlbumEditMode()
+                    true
+                } else {
+                    false
+                }
+            }
+            setOnTouchListener { _, event ->
+                if (
+                    albumEditMode &&
+                    event.action == MotionEvent.ACTION_UP &&
+                    !isTouchInsideGridChild(this, event.x, event.y)
+                ) {
+                    exitAlbumEditMode()
+                    true
+                } else {
+                    false
+                }
+            }
+            setOnScrollListener(object : AbsListView.OnScrollListener {
+                override fun onScrollStateChanged(view: AbsListView?, scrollState: Int) {
+                    if (scrollState == AbsListView.OnScrollListener.SCROLL_STATE_IDLE) {
+                        refreshVisibleOrbitPreviews()
+                    }
+                }
+
+                override fun onScroll(
+                    view: AbsListView?,
+                    firstVisibleItem: Int,
+                    visibleItemCount: Int,
+                    totalItemCount: Int
+                ) = Unit
+            })
+        }
+        albumGrid = grid
+        root.addView(grid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        adapter.setPhotos(albumPhotos)
+        applyFullscreen(root)
+        setContentView(root)
+        if (albumPhotos.isEmpty()) {
+            fetchGalleryManifest()
+        }
+    }
+
+    private fun launchPhotoPicker() {
+        val maxItems = try {
+            MediaStore.getPickImagesMaxLimit().coerceAtMost(PICK_IMAGES_MAX)
+        } catch (_: Exception) {
+            PICK_IMAGES_MAX
+        }
+        val intent = Intent(MediaStore.ACTION_PICK_IMAGES).apply {
+            type = "image/*"
+            putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maxItems)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_PICK_IMAGES)
+        } catch (exc: Exception) {
+            Log.w(TAG, "Platform photo picker unavailable, falling back", exc)
+            val fallback = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "image/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                addCategory(Intent.CATEGORY_OPENABLE)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivityForResult(Intent.createChooser(fallback, "Add photos"), REQUEST_PICK_IMAGES)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_PICK_IMAGES || resultCode != RESULT_OK || data == null) return
+        val uris = mutableListOf<Uri>()
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) {
+                clip.getItemAt(i)?.uri?.let { uris += it }
+            }
+        }
+        data.data?.let { uris += it }
+        addImportedPhotos(uris.distinct())
+    }
+
+    private fun addImportedPhotos(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        if (albumEditMode) exitAlbumEditMode()
+        val added = uris.map { uri ->
+            val id = "local-${SystemClock.elapsedRealtime()}-${nextImportedOrdinal++}"
+            AlbumPhoto(
+                photoId = id,
+                thumbnailUrl = uri.toString(),
+                hasOrbit = false,
+                hasSplat = false,
+                sourceWidth = null,
+                sourceHeight = null,
+                camFx = null,
+                camFy = null,
+                camCx = null,
+                camCy = null,
+                localUri = uri,
+                imported = true
+            )
+        }
+        importedPhotos.addAll(0, added)
+        val curated = albumPhotos.filterNot { it.imported }
+        albumPhotos = importedPhotos + curated
+        albumAdapter?.setPhotos(albumPhotos)
+        albumStatus?.text = momentCountText()
+        Log.i(TAG, "Imported local photos count=${added.size} totalImported=${importedPhotos.size}")
+    }
+
+    private fun fetchGalleryManifest() {
+        val requestSerial = ++galleryRequestSerial
+        albumStatus?.text = "LOADING GALLERY"
+        networkExecutor.execute {
+            try {
+                val text = getText("$GALLERY_URL/gallery", 8_000)
+                val parsed = parseGallery(JSONArray(text))
+                runOnUiThread {
+                    if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
+                    albumPhotos = importedPhotos + parsed
+                    albumAdapter?.setPhotos(albumPhotos)
+                    albumStatus?.text = momentCountText()
+                    Log.i(TAG, "Gallery loaded count=${parsed.size} imported=${importedPhotos.size}")
+                }
+            } catch (exc: Exception) {
+                Log.w(TAG, "Gallery load failed", exc)
+                runOnUiThread {
+                    if (requestSerial != galleryRequestSerial || viewerVisible) return@runOnUiThread
+                    albumStatus?.text = "GALLERY UNAVAILABLE"
+                }
+            }
+        }
+    }
+
+    private fun parseGallery(array: JSONArray): List<AlbumPhoto> {
+        val photos = mutableListOf<AlbumPhoto>()
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            val photoId = item.optString("photoId").trim()
+            if (photoId.isEmpty()) continue
+            if (removedCuratedPhotoIds.contains(photoId)) continue
+            val fallbackDims = legacySourceDims(photoId)
+            val sourceWidth = firstOptionalInt(item, "sourceWidth", "source_width", "width", "imageWidth")
+                ?: fallbackDims?.first
+            val sourceHeight = firstOptionalInt(item, "sourceHeight", "source_height", "height", "imageHeight")
+                ?: fallbackDims?.second
+            if (item.optBoolean("hasSplat", false) && (sourceWidth == null || sourceHeight == null)) {
+                Log.w(TAG, "Gallery item missing source dimensions photoId=$photoId; using generic camera")
+            }
+            photos += AlbumPhoto(
+                photoId = photoId,
+                thumbnailUrl = absoluteGalleryUrl(item.optString("thumbnailUrl")),
+                hasOrbit = item.optBoolean("hasOrbit", false),
+                hasSplat = item.optBoolean("hasSplat", false),
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+                camFx = firstOptionalFloat(item, "camFx", "cam_fx", "fx"),
+                camFy = firstOptionalFloat(item, "camFy", "cam_fy", "fy"),
+                camCx = firstOptionalFloat(item, "camCx", "cam_cx", "cx"),
+                camCy = firstOptionalFloat(item, "camCy", "cam_cy", "cy"),
+                sourceUrl = firstOptionalUrl(item, "sourceUrl", "source_url"),
+                orbitWebpUrl = firstOptionalUrl(item, "orbitWebpUrl", "orbit_webp_url"),
+                orbitPreviewUrl = firstOptionalUrl(item, "orbitPreviewUrl", "orbit_preview_url"),
+                splatStreamUrl = firstOptionalUrl(item, "splatStreamUrl", "splat_stream_url"),
+                splatUrl = firstOptionalUrl(item, "splatUrl", "splat_url")
+            )
+        }
+        return photos
+    }
+
+    private fun updateOrbitPreviews(enabled: Boolean) {
+        if (albumEditMode && enabled) return
+        previewEnabled = enabled
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        albumAdapter?.previewEnabled = enabled
+        val grid = albumGrid ?: return
+        if (!enabled) {
+            Log.i(PREVIEW_TAG, "Orbit preview off")
+            for (i in 0 until grid.childCount) {
+                stopCellPreview(grid.getChildAt(i), animate = true, reason = "toggle-off")
+            }
+        } else {
+            refreshVisibleOrbitPreviews()
+        }
+    }
+
+    private fun refreshVisibleOrbitPreviews() {
+        val grid = albumGrid ?: return
+        val adapter = albumAdapter ?: return
+        if (!previewEnabled || albumEditMode) return
+        previewHandler.removeCallbacksAndMessages(null)
+        val runSerial = ++cascadeRunSerial
+        var cascadeOrdinal = 0
+        for (i in 0 until grid.childCount) {
+            val position = grid.firstVisiblePosition + i
+            val view = grid.getChildAt(i) as? AlbumCellView ?: continue
+            val photo = adapter.photoAt(position) ?: continue
+            if (!photo.hasOrbit) {
+                stopCellPreview(view, reason = "no-orbit")
+                continue
+            }
+            val ordinal = cascadeOrdinal++
+            val delayMs = ordinal * PREVIEW_CASCADE_STAGGER_MS
+            val startsAt = SystemClock.uptimeMillis() + delayMs
+            view.cascadeOrdinal = ordinal
+            view.cascadeScheduledAtMs = startsAt
+            Log.i(
+                PREVIEW_TAG,
+                "Cascade schedule photoId=${photo.photoId} ordinal=$ordinal delayMs=$delayMs"
+            )
+            previewHandler.postDelayed({
+                if (
+                    runSerial == cascadeRunSerial &&
+                    previewEnabled &&
+                    view.boundPhotoId == photo.photoId &&
+                    isCellStillVisible(view)
+                ) {
+                    adapter.updatePreviewForCell(view, photo)
+                }
+            }, delayMs)
+        }
+    }
+
+    private fun startOrbitPreview(cell: AlbumCellView, photo: AlbumPhoto, url: String, requestSerial: Int) {
+        if (cell.loadingPreviewPhotoId == photo.photoId || cell.playingPreviewPhotoId == photo.photoId) return
+        cell.previewGeneration++
+        val generation = cell.previewGeneration
+        cell.loadingPreviewPhotoId = photo.photoId
+        cell.playingPreviewPhotoId = null
+        Log.i(PREVIEW_TAG, "Orbit preview loading photoId=${photo.photoId} url=$url")
+        cell.preview.animate().cancel()
+        cell.thumbnail.animate().cancel()
+        stopPreviewDrawable(cell)
+        cell.preview.setImageDrawable(null)
+        cell.preview.visibility = View.GONE
+        cell.preview.alpha = 0f
+        cell.preview.scaleX = PREVIEW_REVEAL_START_SCALE
+        cell.preview.scaleY = PREVIEW_REVEAL_START_SCALE
+        cell.thumbnail.visibility = View.VISIBLE
+        cell.thumbnail.alpha = 1f
+        cell.thumbnail.bringToFront()
+        networkExecutor.execute {
+            try {
+                val file = cachedOrbitPreview(photo.photoId, url)
+                val drawable = decodeOrbitPreview(file)
+                runOnUiThread {
+                    if (
+                        requestSerial == previewRequestSerial &&
+                        previewEnabled &&
+                        cell.boundPhotoId == photo.photoId &&
+                        cell.loadingPreviewPhotoId == photo.photoId &&
+                        cell.previewGeneration == generation
+                    ) {
+                        playOrbitPreview(cell, photo, drawable, requestSerial, generation)
+                    } else if (cell.boundPhotoId == photo.photoId) {
+                        cell.loadingPreviewPhotoId = null
+                    }
+                }
+            } catch (exc: Exception) {
+                Log.w(PREVIEW_TAG, "Orbit preview unavailable photoId=${photo.photoId}: ${exc.message}")
+                runOnUiThread {
+                    if (cell.boundPhotoId == photo.photoId) {
+                        stopCellPreview(cell)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cachedOrbitPreview(photoId: String, url: String): File {
+        val safeId = photoId.replace(Regex("[^A-Za-z0-9_.-]+"), "-")
+        val file = File(cacheDir, "orbit-preview-$safeId-$ORBIT_PREVIEW_CACHE_VERSION.webp")
+        if (file.length() > 0L) {
+            Log.i(
+                PREVIEW_TAG,
+                "Orbit preview cache hit photoId=$photoId version=$ORBIT_PREVIEW_CACHE_VERSION bytes=${file.length()}"
+            )
+            return file
+        }
+        val started = System.nanoTime()
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 4_000
+            readTimeout = 12_000
+            requestMethod = "GET"
+        }
+        try {
+            if (conn.responseCode !in 200..299) {
+                throw RuntimeException("HTTP ${conn.responseCode}")
+            }
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            tmp.outputStream().use { out ->
+                conn.inputStream.use { input -> input.copyTo(out) }
+            }
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+        } finally {
+            conn.disconnect()
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        Log.i(PREVIEW_TAG, "Orbit preview cached photoId=$photoId bytes=${file.length()} elapsedMs=$elapsedMs")
+        return file
+    }
+
+    private fun decodeOrbitPreview(file: File): Drawable =
+        ImageDecoder.decodeDrawable(ImageDecoder.createSource(file))
+
+    private fun playOrbitPreview(
+        cell: AlbumCellView,
+        photo: AlbumPhoto,
+        drawable: Drawable,
+        requestSerial: Int,
+        generation: Int
+    ) {
+        if (
+            requestSerial != previewRequestSerial ||
+            !previewEnabled ||
+            cell.boundPhotoId != photo.photoId ||
+            cell.previewGeneration != generation ||
+            cell.loadingPreviewPhotoId != photo.photoId ||
+            !isCellStillVisible(cell)
+        ) {
+            cell.loadingPreviewPhotoId = null
+            return
+        }
+        cell.preview.setImageDrawable(drawable)
+        cell.preview.visibility = View.VISIBLE
+        cell.preview.alpha = 0f
+        cell.preview.scaleX = PREVIEW_REVEAL_START_SCALE
+        cell.preview.scaleY = PREVIEW_REVEAL_START_SCALE
+        cell.preview.bringToFront()
+        if (drawable is AnimatedImageDrawable) {
+            drawable.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+            drawable.start()
+        }
+        cell.loadingPreviewPhotoId = null
+        cell.playingPreviewPhotoId = photo.photoId
+        val startedAtMs = SystemClock.uptimeMillis()
+        val scheduledAtMs = cell.cascadeScheduledAtMs.takeIf { it > 0L } ?: startedAtMs
+        Log.i(
+            PREVIEW_TAG,
+            "Cascade start photoId=${photo.photoId} ordinal=${cell.cascadeOrdinal} " +
+                "tMs=$startedAtMs scheduledDeltaMs=${startedAtMs - scheduledAtMs} " +
+                "active=${visibleAnimatedPreviewCount()} animated=${drawable is AnimatedImageDrawable}"
+        )
+        cell.preview.animate().cancel()
+        cell.preview.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(PREVIEW_REVEAL_MS)
+            .withEndAction {
+                if (
+                    cell.previewGeneration == generation &&
+                    cell.playingPreviewPhotoId == photo.photoId
+                ) {
+                    cell.thumbnail.visibility = View.GONE
+                }
+            }
+            .start()
+        Log.i(PREVIEW_TAG, "Orbit preview playing photoId=${photo.photoId} format=webp animated=${drawable is AnimatedImageDrawable}")
+    }
+
+    private fun loadOrbitPreview(photo: AlbumPhoto): String? {
+        val url = photo.orbitWebpUrl
+            ?: photo.orbitPreviewUrl
+            ?: if (photo.hasOrbit && !photo.imported) {
+                "$ORBIT_PREVIEW_URL?photoId=${Uri.encode(photo.photoId)}&format=webp"
+            } else {
+                null
+            }
+            ?: return null
+        val absolute = absoluteGalleryUrl(url)
+        val separator = if (absolute.contains("?")) "&" else "?"
+        return "$absolute${separator}v=$ORBIT_PREVIEW_CACHE_VERSION"
+    }
+
+    private fun enterAlbumEditMode() {
+        if (albumEditMode || viewerVisible) return
+        albumEditMode = true
+        updateOrbitPreviews(false)
+        styleAlbumActionButton()
+        albumAdapter?.notifyDataSetChanged()
+        refreshVisibleEditMode()
+        Log.i(TAG, "Album edit mode entered")
+    }
+
+    private fun exitAlbumEditMode() {
+        if (!albumEditMode) return
+        albumEditMode = false
+        styleAlbumActionButton()
+        albumGrid?.let { grid ->
+            for (i in 0 until grid.childCount) {
+                (grid.getChildAt(i) as? AlbumCellView)?.let { stopCellJiggle(it) }
+            }
+        }
+        albumAdapter?.notifyDataSetChanged()
+        Log.i(TAG, "Album edit mode exited")
+    }
+
+    private fun styleAlbumActionButton() {
+        val button = albumActionButton ?: return
+        if (albumEditMode) {
+            button.text = "Done"
+            button.setOnClickListener { exitAlbumEditMode() }
+            button.setTextColor(COLOR_INK)
+            button.background = rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            applySoftShadow(button, 2)
+        } else {
+            button.text = "3D Preview"
+            button.setOnClickListener {
+                updateOrbitPreviews(!previewEnabled)
+                stylePreviewToggle(button, previewEnabled)
+            }
+            stylePreviewToggle(button, previewEnabled)
+        }
+    }
+
+    private fun refreshVisibleEditMode() {
+        val grid = albumGrid ?: return
+        for (i in 0 until grid.childCount) {
+            val position = grid.firstVisiblePosition + i
+            val cell = grid.getChildAt(i) as? AlbumCellView ?: continue
+            val photo = albumAdapter?.photoAt(position)
+            applyEditModeToCell(cell, photo)
+        }
+    }
+
+    private fun removePhotoFromAlbum(photo: AlbumPhoto) {
+        if (photo.imported) {
+            importedPhotos.removeAll { it.photoId == photo.photoId }
+        } else {
+            removedCuratedPhotoIds.add(photo.photoId)
+            saveRemovedCuratedPhotoIds()
+        }
+        thumbnailCache.remove(photo.photoId)
+        albumPhotos = albumPhotos.filterNot { it.photoId == photo.photoId }
+        albumAdapter?.setPhotos(albumPhotos)
+        albumStatus?.text = momentCountText()
+        refreshVisibleEditMode()
+        Log.i(TAG, "Album photo removed locally photoId=${photo.photoId} imported=${photo.imported}")
+    }
+
+    private fun applyEditModeToCell(cell: AlbumCellView, photo: AlbumPhoto?) {
+        val isPhoto = photo != null
+        cell.deleteBadge.visibility = if (albumEditMode && isPhoto) View.VISIBLE else View.GONE
+        if (albumEditMode && isPhoto) {
+            applySoftShadow(cell.deleteBadge, 3)
+            cell.deleteBadge.bringToFront()
+            startCellJiggle(cell)
+        } else {
+            stopCellJiggle(cell)
+        }
+    }
+
+    private fun startCellJiggle(cell: AlbumCellView) {
+        if (cell.jiggleAnimator?.isStarted == true) return
+        cell.rotation = -EDIT_JIGGLE_DEGREES
+        cell.jiggleAnimator = ObjectAnimator.ofFloat(cell, View.ROTATION, -EDIT_JIGGLE_DEGREES, EDIT_JIGGLE_DEGREES).apply {
+            duration = EDIT_JIGGLE_DURATION_MS
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = LinearInterpolator()
+            startDelay = ((cell.boundPhotoId?.hashCode() ?: 0).let { kotlin.math.abs(it) } % 80).toLong()
+            start()
+        }
+    }
+
+    private fun stopCellJiggle(cell: AlbumCellView) {
+        cell.jiggleAnimator?.cancel()
+        cell.jiggleAnimator = null
+        cell.rotation = 0f
+    }
+
+    private fun handleAlbumCellTouch(cell: AlbumCellView, photo: AlbumPhoto, event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                cell.pendingLongPress?.let { previewHandler.removeCallbacks(it) }
+                cell.touchDownX = event.x
+                cell.touchDownY = event.y
+                val runnable = Runnable {
+                    if (cell.boundPhotoId == photo.photoId && !albumEditMode && !viewerVisible) {
+                        cell.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                        enterAlbumEditMode()
+                    }
+                }
+                cell.pendingLongPress = runnable
+                previewHandler.postDelayed(runnable, EDIT_LONG_PRESS_MS)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = kotlin.math.abs(event.x - cell.touchDownX)
+                val dy = kotlin.math.abs(event.y - cell.touchDownY)
+                if (dx > dpFloat(10f) || dy > dpFloat(10f)) {
+                    cell.pendingLongPress?.let { previewHandler.removeCallbacks(it) }
+                    cell.pendingLongPress = null
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                cell.pendingLongPress?.let { previewHandler.removeCallbacks(it) }
+                cell.pendingLongPress = null
+            }
+        }
+        return false
+    }
+
+    private fun isTouchInsideGridChild(grid: GridView, x: Float, y: Float): Boolean {
+        for (i in 0 until grid.childCount) {
+            val child = grid.getChildAt(i)
+            if (x >= child.left && x <= child.right && y >= child.top && y <= child.bottom) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private inner class AlbumGridAdapter : BaseAdapter() {
+        private var photos: List<AlbumPhoto> = emptyList()
+        var previewEnabled: Boolean = false
+
+        fun setPhotos(next: List<AlbumPhoto>) {
+            photos = next
+            notifyDataSetChanged()
+        }
+
+        fun photoAt(position: Int): AlbumPhoto? =
+            photos.getOrNull(position - 1)
+
+        override fun getCount(): Int = photos.size + 1
+
+        override fun getItem(position: Int): Any =
+            photoAt(position) ?: ADD_TILE_ID
+
+        override fun getItemId(position: Int): Long =
+            if (position == 0) ADD_TILE_ID.hashCode().toLong() else photos[position - 1].photoId.hashCode().toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val cell = (convertView as? AlbumCellView) ?: AlbumCellView(this@MainActivity)
+            val photo = photoAt(position)
+            if (photo == null) {
+                bindAddCell(cell)
+            } else {
+                bindCell(cell, photo)
+            }
+            return cell
+        }
+
+        private fun bindAddCell(cell: AlbumCellView) {
+            if (cell.boundPhotoId != ADD_TILE_ID) {
+                stopCellPreview(cell)
+            }
+            cell.boundPhotoId = ADD_TILE_ID
+            cell.alpha = 1f
+            cell.contentDescription = "Add photo"
+            cell.isClickable = true
+            cell.isFocusable = true
+            cell.setOnClickListener {
+                if (albumEditMode) exitAlbumEditMode() else launchPhotoPicker()
+            }
+            cell.background = rounded(COLOR_SURFACE, dp(14).toFloat(), dpFloat(1.5f), COLOR_HAIRLINE)
+            cell.clipToOutline = true
+            applySoftShadow(cell)
+            cell.thumbnail.visibility = View.GONE
+            cell.preview.visibility = View.GONE
+            cell.addStack.visibility = View.VISIBLE
+            cell.addPlus.typeface = inter(300)
+            cell.addLabel.typeface = inter(600)
+            cell.addStack.bringToFront()
+            cell.setOnLongClickListener(null)
+            cell.isLongClickable = false
+            cell.setOnTouchListener(null)
+            cell.pendingLongPress?.let { previewHandler.removeCallbacks(it) }
+            cell.pendingLongPress = null
+            cell.deleteBadge.setOnClickListener(null)
+            applyEditModeToCell(cell, null)
+        }
+
+        private fun bindCell(cell: AlbumCellView, photo: AlbumPhoto) {
+            if (cell.boundPhotoId != photo.photoId) {
+                stopCellPreview(cell)
+            }
+            cell.boundPhotoId = photo.photoId
+            cell.background = rounded(COLOR_SURFACE, dp(14).toFloat())
+            cell.clipToOutline = true
+            applySoftShadow(cell)
+            cell.alpha = 1f
+            cell.contentDescription = photo.photoId
+            cell.isClickable = true
+            cell.isFocusable = true
+            cell.setOnClickListener {
+                if (!albumEditMode) showPhotoScreen(photo)
+            }
+            cell.setOnLongClickListener {
+                enterAlbumEditMode()
+                true
+            }
+            cell.setOnTouchListener { _, event -> handleAlbumCellTouch(cell, photo, event) }
+            cell.deleteBadge.setOnClickListener {
+                removePhotoFromAlbum(photo)
+            }
+            cell.addStack.visibility = View.GONE
+            cell.thumbnail.visibility = View.VISIBLE
+            cell.thumbnail.alpha = 1f
+            cell.thumbnail.bringToFront()
+            cell.thumbnail.setBackgroundColor(COLOR_SURFACE)
+            loadThumbnail(photo, cell)
+            applyEditModeToCell(cell, photo)
+        }
+
+        fun updatePreviewForCell(cell: AlbumCellView, photo: AlbumPhoto) {
+            if (!previewEnabled || !photo.hasOrbit) {
+                stopCellPreview(cell)
+                return
+            }
+            val url = loadOrbitPreview(photo) ?: return
+            startOrbitPreview(cell, photo, url, previewRequestSerial)
+        }
+    }
+
+    private class AlbumCellView(context: Context) : SquareFrameLayout(context) {
+        val preview: ImageView = ImageView(context).apply {
+            visibility = View.GONE
+            isClickable = false
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        val thumbnail: ImageView = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            isClickable = false
+        }
+        val addPlus: TextView = TextView(context).apply {
+            text = "+"
+            textSize = 28f
+            setTextColor(COLOR_INK)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+        }
+        val addLabel: TextView = TextView(context).apply {
+            text = "Add"
+            textSize = 12f
+            setTextColor(COLOR_INK_SOFT)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+        }
+        val addStack: LinearLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            isClickable = false
+            addView(addPlus, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(addLabel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val deleteBadge: DeleteBadgeView = DeleteBadgeView(context).apply {
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Remove photo"
+        }
+        var boundPhotoId: String? = null
+        var loadingPreviewPhotoId: String? = null
+        var playingPreviewPhotoId: String? = null
+        var previewGeneration: Int = 0
+        var cascadeOrdinal: Int = -1
+        var cascadeScheduledAtMs: Long = 0L
+        var jiggleAnimator: ObjectAnimator? = null
+        var pendingLongPress: Runnable? = null
+        var touchDownX: Float = 0f
+        var touchDownY: Float = 0f
+
+        init {
+            addView(preview, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(thumbnail, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(addStack, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            val density = context.resources.displayMetrics.density
+            val badgeSize = (30f * density + 0.5f).toInt()
+            val badgeInset = (5f * density + 0.5f).toInt()
+            addView(
+                deleteBadge,
+                FrameLayout.LayoutParams(badgeSize, badgeSize, Gravity.TOP or Gravity.END).apply {
+                    topMargin = badgeInset
+                    rightMargin = badgeInset
+                }
+            )
+        }
+    }
+
+    private fun stopCellPreview(view: View?, animate: Boolean = false, reason: String = "stop") {
+        val cell = view as? AlbumCellView ?: return
+        val photoId = cell.boundPhotoId ?: cell.loadingPreviewPhotoId ?: cell.playingPreviewPhotoId
+        cell.previewGeneration++
+        val generation = cell.previewGeneration
+        cell.loadingPreviewPhotoId = null
+        cell.playingPreviewPhotoId = null
+        cell.cascadeOrdinal = -1
+        cell.cascadeScheduledAtMs = 0L
+        cell.preview.animate().cancel()
+        cell.thumbnail.animate().cancel()
+        cell.thumbnail.visibility = View.VISIBLE
+        cell.thumbnail.alpha = 1f
+        cell.thumbnail.bringToFront()
+        if (cell.preview.visibility == View.VISIBLE) {
+            Log.i(PREVIEW_TAG, "Orbit preview stop photoId=$photoId reason=$reason animate=$animate")
+        }
+        if (animate && cell.preview.visibility == View.VISIBLE) {
+            cell.preview.animate()
+                .alpha(0f)
+                .scaleX(PREVIEW_REVEAL_START_SCALE)
+                .scaleY(PREVIEW_REVEAL_START_SCALE)
+                .setDuration(PREVIEW_REVEAL_MS)
+                .withEndAction {
+                    if (cell.previewGeneration == generation) {
+                        stopPreviewDrawable(cell)
+                        cell.preview.setImageDrawable(null)
+                        cell.preview.visibility = View.GONE
+                    }
+                }
+                .start()
+        } else {
+            stopPreviewDrawable(cell)
+            cell.preview.setImageDrawable(null)
+            cell.preview.visibility = View.GONE
+            cell.preview.alpha = 0f
+            cell.preview.scaleX = PREVIEW_REVEAL_START_SCALE
+            cell.preview.scaleY = PREVIEW_REVEAL_START_SCALE
+        }
+    }
+
+    private fun stopPreviewDrawable(cell: AlbumCellView) {
+        (cell.preview.drawable as? AnimatedImageDrawable)?.stop()
+    }
+
+    private fun isCellStillVisible(cell: AlbumCellView): Boolean {
+        val grid = albumGrid ?: return false
+        if (cell.parent !== grid || cell.windowToken == null) return false
+        for (i in 0 until grid.childCount) {
+            if (grid.getChildAt(i) === cell) return true
+        }
+        return false
+    }
+
+    private fun visibleAnimatedPreviewCount(): Int {
+        val grid = albumGrid ?: return 0
+        var count = 0
+        for (i in 0 until grid.childCount) {
+            val cell = grid.getChildAt(i) as? AlbumCellView ?: continue
+            if (cell.playingPreviewPhotoId != null && cell.preview.visibility == View.VISIBLE) count++
+        }
+        return count
+    }
+
+    private fun loadThumbnail(photo: AlbumPhoto, cell: AlbumCellView) {
+        synchronized(thumbnailCache) { thumbnailCache[photo.photoId] }?.let {
+            if (cell.boundPhotoId == photo.photoId) {
+                cell.thumbnail.setImageBitmap(it)
+            }
+            return
+        }
+        cell.thumbnail.setImageBitmap(null)
+        networkExecutor.execute {
+            try {
+                val bitmap = photo.localUri
+                    ?.let { decodeLocalBitmap(it, THUMBNAIL_MAX_SIDE) }
+                    ?: fetchBitmap(photo.thumbnailUrl)
+                synchronized(thumbnailCache) {
+                    thumbnailCache[photo.photoId] = bitmap
+                }
+                runOnUiThread {
+                    if (cell.boundPhotoId == photo.photoId) {
+                        cell.thumbnail.setImageBitmap(bitmap)
+                        Log.i(TAG, "Thumbnail loaded photoId=${photo.photoId}")
+                    }
+                }
+            } catch (exc: Exception) {
+                Log.w(TAG, "Thumbnail failed photoId=${photo.photoId}: ${exc.message}")
+            }
+        }
+    }
+
+    private fun loadDisplayBitmap(photo: AlbumPhoto): Bitmap =
+        photo.localUri
+            ?.let { decodeLocalBitmap(it, DISPLAY_IMAGE_MAX_SIDE) }
+            ?: fetchBitmap(photo.sourceUrl ?: absoluteGalleryUrl("/source?photoId=${Uri.encode(photo.photoId)}"))
+
+    private fun showPhotoScreen(photo: AlbumPhoto) {
+        viewerVisible = true
+        previewEnabled = false
+        glView?.shutdown()
+        glView?.onPause()
+        glView = null
+        latestCapture = null
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        albumGrid?.let { grid ->
+            for (i in 0 until grid.childCount) {
+                stopCellPreview(grid.getChildAt(i), reason = "open-photo")
+            }
+        }
+
+        val imagePlate = FrameLayout(this).apply {
+            background = rounded(COLOR_SURFACE, dp(16).toFloat())
+            clipToOutline = true
+            applySoftShadow(this)
+        }
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(COLOR_SURFACE)
+            contentDescription = "flat-photo"
+        }
+        imagePlate.addView(image, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        val status = TextView(this).apply {
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 13f
+            typeface = inter(500)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+        }
+        setInlineStatus(status, if (photo.hasSplat || photo.localUri != null) "" else "3D view unavailable")
+        val back = studioBackButton()
+        val reframe = TextView(this).apply {
+            text = "Reframe"
+            contentDescription = "reframing"
+            isEnabled = photo.hasSplat || photo.localUri != null
+            setTextColor(if (isEnabled) COLOR_INK else COLOR_INK_SOFT)
+            textSize = 15f
+            typeface = inter(700)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            minHeight = dp(48)
+            setPadding(dp(28), dp(14), dp(28), dp(14))
+            background = roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(24).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            applySoftShadow(this, 4)
+            setOnClickListener { beginReframing(photo, status, this) }
+        }
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(
+                imagePlate,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER
+                ).apply {
+                    leftMargin = dp(18)
+                    rightMargin = dp(18)
+                    topMargin = dp(82)
+                    bottomMargin = dp(112)
+                }
+            )
+            addView(
+                back,
+                FrameLayout.LayoutParams(
+                    dp(44),
+                    dp(44),
+                    Gravity.START or Gravity.TOP
+                ).apply {
+                    topMargin = dp(26)
+                    leftMargin = dp(18)
+                }
+            )
+            addView(
+                status,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).apply {
+                    bottomMargin = dp(96)
+                }
+            )
+            addView(
+                reframe,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).apply {
+                    bottomMargin = dp(30)
+                }
+            )
+        }
+        applyFullscreen(root)
+        setContentView(root)
+
+        networkExecutor.execute {
+            try {
+                val bitmap = loadDisplayBitmap(photo)
+                runOnUiThread {
+                    fitPlateToBitmap(imagePlate, bitmap.width, bitmap.height, dp(18), dp(82), dp(112))
+                    image.setImageBitmap(bitmap)
+                    setInlineStatus(status, if (photo.hasSplat || photo.localUri != null) "" else "3D view unavailable")
+                    Log.i(TAG, "Flat photo loaded photoId=${photo.photoId} size=${bitmap.width}x${bitmap.height}")
+                }
+            } catch (exc: Exception) {
+                Log.w(TAG, "Flat photo failed photoId=${photo.photoId}: ${exc.message}", exc)
+                runOnUiThread { setInlineStatus(status, "Photo unavailable: ${exc.message}") }
+            }
+        }
+    }
+
+    private fun beginReframing(photo: AlbumPhoto, status: TextView, button: View) {
+        if (!photo.imported && photo.hasSplat) {
+            showViewer(photo)
+            return
+        }
+        val localUri = photo.localUri
+        if (photo.imported && photo.hasSplat && localUri != null) {
+            val cacheKey = SplatCache.keyFor(photo.photoId, DEFAULT_SPLAT_DENSITY)
+            if (SplatCache.lookup(this, cacheKey, SPLAT_ROW_BYTES) != null) {
+                Log.i(TAG, "Imported Reframing cache hit photoId=${photo.photoId} key=$cacheKey")
+                showViewer(photo)
+                return
+            }
+            Log.i(TAG, "Imported Reframing cache miss photoId=${photo.photoId} key=$cacheKey; re-ingesting")
+        }
+        if (localUri == null) {
+            setInlineStatus(status, "3D view unavailable")
+            return
+        }
+        button.isEnabled = false
+        setInlineStatus(status, "Reframing...")
+        Log.i(TAG, "Ingest start localPhotoId=${photo.photoId} uri=$localUri")
+        networkExecutor.execute {
+            try {
+                val started = SystemClock.elapsedRealtime()
+                val result = postIngestSplat(photo)
+                val baked = result.photo
+                replaceImportedPhoto(photo.photoId, baked)
+                val elapsed = SystemClock.elapsedRealtime() - started
+                Log.i(
+                    TAG,
+                    "Ingest done localPhotoId=${photo.photoId} photoId=${baked.photoId} " +
+                        "records=${result.records} bytes=${result.sizeBytes} stored=${result.store.stored} " +
+                        "elapsedMs=$elapsed"
+                )
+                runOnUiThread {
+                    setInlineStatus(status, "Reframing done in ${elapsed}ms")
+                    showViewer(baked)
+                }
+            } catch (exc: Exception) {
+                Log.e(TAG, "Ingest failed localPhotoId=${photo.photoId}", exc)
+                runOnUiThread {
+                    setInlineStatus(status, "Reframing failed: ${exc.message}")
+                    button.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun showViewer(photo: AlbumPhoto) {
+        if (!photo.hasSplat) {
+            showPhotoScreen(photo)
+            return
+        }
+        viewerVisible = true
+        previewEnabled = false
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        albumGrid?.let { grid ->
+            for (i in 0 until grid.childCount) {
+                stopCellPreview(grid.getChildAt(i), reason = "open-viewer")
+            }
+        }
+        assetName = photo.splatAsset
+        currentViewerPhoto = photo
+        latestCapture = null
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        displayMode = DisplayMode.RAW
+        difixBusy = false
+        fluxBusy = false
+
+        renderStatus = TextView(this).apply {
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 11f
+            typeface = inter(500)
+            includeFontPadding = false
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(260)
+            background = rounded(0xEFFFFFFF.toInt(), dp(16).toFloat())
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            text = "Loading $assetName"
+        }
+        overlay = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(COLOR_CANVAS)
+            visibility = View.GONE
+        }
+        generateButton = primaryGenerateButton()
+
+        val viewer = SplatGlView(
+            this,
+            assetName,
+            photo.photoId,
+            { message -> runOnUiThread { renderStatus.text = message } },
+            { capture -> handleReleaseCapture(capture) },
+            { beginLiveOrbit() },
+            releaseCaptureEnabled,
+            postPassEnabled,
+            streamDensityOverride,
+            footprintScaleOverride,
+            photo.sourceWidth,
+            photo.sourceHeight,
+            photo.camFx,
+            photo.camFy,
+            photo.camCx,
+            photo.camCy,
+            photo.splatStreamUrl,
+            splatCacheMaxBytesOverride,
+            networkStreamEnabled = !photo.imported
+        )
+        glView = viewer
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+        }
+        root.addView(viewer, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(overlay, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(
+            studioBackButton(),
+            FrameLayout.LayoutParams(
+                dp(44),
+                dp(44),
+                Gravity.START or Gravity.TOP
+            ).apply {
+                topMargin = dp(26)
+                leftMargin = dp(18)
+            }
+        )
+        if (SHOW_RENDER_DEBUG) {
+            root.addView(
+                renderStatus,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END
+                ).apply {
+                    topMargin = dp(28)
+                    rightMargin = dp(18)
+                }
+            )
+        }
+        root.addView(
+            generateButton,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                dp(52),
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                bottomMargin = dp(32)
+            }
+        )
+        updateViewerControls()
+        applyFullscreen(root)
+        setContentView(root)
+    }
+
+    private fun showStaticPhoto(photo: AlbumPhoto) {
+        viewerVisible = true
+        previewEnabled = false
+        glView?.shutdown()
+        glView?.onPause()
+        glView = null
+        latestCapture = null
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        previewRequestSerial++
+        cascadeRunSerial++
+        previewHandler.removeCallbacksAndMessages(null)
+        albumGrid?.let { grid ->
+            for (i in 0 until grid.childCount) {
+                stopCellPreview(grid.getChildAt(i), reason = "open-static")
+            }
+        }
+
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(COLOR_SURFACE)
+        }
+        val status = TextView(this).apply {
+            setTextColor(COLOR_INK_SOFT)
+            background = rounded(0xEFFFFFFF.toInt(), dp(18).toFloat())
+            textSize = 13f
+            typeface = inter(500)
+            setPadding(dp(14), dp(9), dp(14), dp(9))
+            text = "3D view unavailable"
+        }
+        val back = studioBackButton()
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(image, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(
+                status,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.START or Gravity.TOP
+                ).apply {
+                    topMargin = dp(24)
+                    leftMargin = dp(16)
+                }
+            )
+            addView(
+                back,
+                FrameLayout.LayoutParams(
+                    dp(44),
+                    dp(44),
+                    Gravity.START or Gravity.TOP
+                ).apply {
+                    topMargin = dp(26)
+                    leftMargin = dp(18)
+                }
+            )
+        }
+        synchronized(thumbnailCache) { thumbnailCache[photo.photoId] }?.let { image.setImageBitmap(it) }
+        networkExecutor.execute {
+            try {
+                val bitmap = fetchBitmap(photo.thumbnailUrl)
+                synchronized(thumbnailCache) { thumbnailCache[photo.photoId] = bitmap }
+                runOnUiThread { image.setImageBitmap(bitmap) }
+            } catch (exc: Exception) {
+                Log.w(TAG, "Static photo failed photoId=${photo.photoId}: ${exc.message}")
+            }
+        }
+        applyFullscreen(root)
+        setContentView(root)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        glView?.onResume()
+    }
+
+    override fun onPause() {
+        glView?.onPause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        previewHandler.removeCallbacksAndMessages(null)
+        glView?.shutdown()
+        networkExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (albumEditMode) {
+            exitAlbumEditMode()
+        } else if (viewerVisible) {
+            showAlbum()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    private fun handleReleaseCapture(capture: ReleaseCapture) {
+        if (difixBusy) return
+        latestCapture = capture
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        displayMode = DisplayMode.RAW
+        runOnUiThread {
+            overlay.visibility = View.GONE
+            updateViewerControls()
+            setPipelineStatus("Captured ${capture.width}x${capture.height}; running Difix...")
+        }
+        difixBusy = true
+        networkExecutor.execute {
+            try {
+                val started = System.nanoTime()
+                val response = postJson("$DIFIX_URL/refine", buildDifixBody(capture), 240_000)
+                val refined = response.getString("refinedPng")
+                val bitmap = decodeDataUrl(refined)
+                val displayBitmap = displayCompositeBitmap(capture, bitmap)
+                difixDataUrl = refined
+                finalBitmap = bitmap
+                displayMode = DisplayMode.DIFIX
+                val elapsed = (System.nanoTime() - started) / 1_000_000
+                runOnUiThread {
+                    overlay.setImageBitmap(displayBitmap)
+                    overlay.visibility = View.VISIBLE
+                    updateViewerControls()
+                    setPipelineStatus("Difix done in ${elapsed}ms (${capture.width}x${capture.height})")
+                }
+            } catch (exc: Exception) {
+                runOnUiThread { setPipelineStatus("Difix failed: ${exc.message}") }
+            } finally {
+                difixBusy = false
+            }
+        }
+    }
+
+    private fun beginLiveOrbit() {
+        if (displayMode == DisplayMode.RAW && overlay.visibility != View.VISIBLE) return
+        Log.i(TAG, "Live orbit requested; hiding result overlay from mode=$displayMode")
+        displayMode = DisplayMode.RAW
+        overlay.visibility = View.GONE
+        updateViewerControls()
+        setPipelineStatus("Showing raw splat")
+    }
+
+    private fun buildDifixBody(capture: ReleaseCapture): JSONObject {
+        val photo = currentViewerPhoto
+        val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
+        val metrics = captureMetrics(capture)
+        val body = JSONObject()
+            .put("ply", capture.assetName)
+            .put("box", "android-album-demo")
+            .put("photoId", photoId)
+            .put("prompt", "remove degradation")
+            .put("seedPng", capture.seedDataUrl)
+            .put("previewPng", capture.previewDataUrl)
+            .put("refineMaskPng", capture.refineMaskDataUrl)
+            .put("metrics", metrics)
+        if (photo?.imported == true && photo.localUri != null) {
+            body.put("sourceId", photoId)
+            body.put("source", localSourceDataUrl(photo))
+            metrics.put("transportMode", "android-local-source-data-url+jpeg")
+        } else {
+            body.put("sourceId", "$photoId-original")
+            sourcePathForAsset(capture.assetName)?.let { body.put("source", it) }
+        }
+        return body
+    }
+
+    private fun captureMetrics(capture: ReleaseCapture): JSONObject =
+        JSONObject()
+            .put("client", "android-album-demo")
+            .put("seedMode", "black-hole-render")
+            .put("previewMode", "gpu-push-pull-filled-render")
+            .put("transportMode", "android-source-path+jpeg")
+            .put("releaseMaxSide", capture.releaseMaxSide)
+            .put("captureSize", JSONArray().put(capture.width).put(capture.height))
+            .put("renderSize", JSONArray().put(capture.renderWidth).put(capture.renderHeight))
+            .put("alphaHoleThreshold", capture.alphaThreshold)
+            .put("gapPx", capture.gapPx)
+            .put("peripheralPx", capture.peripheralPx)
+            .put("interiorPx", capture.interiorPx)
+            .put("coveredPx", capture.coveredPx)
+
+    private fun generateFlux() {
+        val capture = latestCapture ?: return
+        val difix = difixDataUrl ?: return
+        if (fluxBusy) return
+        fluxBusy = true
+        runOnUiThread {
+            updateViewerControls()
+            setPipelineStatus("Generating final image...")
+        }
+        networkExecutor.execute {
+            try {
+                val started = System.nanoTime()
+                val photo = currentViewerPhoto
+                val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
+                val metrics = captureMetrics(capture)
+                val body = JSONObject()
+                    .put("photoId", photoId)
+                    .put("ply", capture.assetName)
+                    .put("image", difix)
+                    .put("mask", capture.peripheralMaskDataUrl)
+                    .put("metrics", metrics)
+                if (photo?.imported == true && photo.localUri != null) {
+                    body.put("sourceId", photoId)
+                    body.put("source", localSourceDataUrl(photo))
+                    metrics.put("transportMode", "android-local-source-data-url+jpeg")
+                }
+                val response = postJson("$FLUX_URL/fill", body, 300_000)
+                val image = response.getString("image")
+                val bitmap = decodeDataUrl(image)
+                fluxDataUrl = image
+                finalBitmap = bitmap
+                displayMode = DisplayMode.FLUX
+                val elapsed = (System.nanoTime() - started) / 1_000_000
+                fluxBusy = false
+                runOnUiThread {
+                    overlay.setImageBitmap(bitmap)
+                    overlay.visibility = View.VISIBLE
+                    updateViewerControls()
+                    setPipelineStatus("FLUX done in ${elapsed}ms (${bitmap.width}x${bitmap.height})")
+                }
+            } catch (exc: Exception) {
+                fluxBusy = false
+                runOnUiThread {
+                    updateViewerControls()
+                    setPipelineStatus("FLUX failed: ${exc.message}")
+                }
+            }
+        }
+    }
+
+    private fun saveFinalImage() {
+        val bitmap = finalBitmap ?: return
+        val name = "wici-spatial-${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val resolver = contentResolver
+        var uri: Uri? = null
+        try {
+            uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            requireNotNull(uri) { "MediaStore insert returned null" }
+            resolver.openOutputStream(uri).use { out ->
+                requireNotNull(out) { "openOutputStream returned null" }
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            setPipelineStatus("Saved to Downloads/$name")
+        } catch (exc: Exception) {
+            uri?.let { resolver.delete(it, null, null) }
+            setPipelineStatus("Save failed: ${exc.message}")
+        }
+    }
+
+    private fun setPipelineStatus(message: String) {
+        Log.i(TAG, message)
+    }
+
+    private fun displayCompositeBitmap(capture: ReleaseCapture, result: Bitmap): Bitmap {
+        return try {
+            // Display-only: keep Difix/FLUX payloads raw, but soften the visible binary mask edge.
+            val w = result.width
+            val h = result.height
+            val preview = decodeDataUrl(capture.previewDataUrl).fitTo(w, h)
+            val mask = decodeDataUrl(capture.peripheralMaskDataUrl).fitTo(w, h)
+            val resultPixels = IntArray(w * h)
+            val previewPixels = IntArray(w * h)
+            val maskPixels = IntArray(w * h)
+            result.getPixels(resultPixels, 0, w, 0, 0, w, h)
+            preview.getPixels(previewPixels, 0, w, 0, 0, w, h)
+            mask.getPixels(maskPixels, 0, w, 0, 0, w, h)
+            val peripheral = BooleanArray(w * h)
+            for (i in peripheral.indices) peripheral[i] = (maskPixels[i] and 0xff) > 127
+            val edgeAlpha = peripheralBoundaryAlpha(peripheral, w, h, DISPLAY_EDGE_FEATHER_PX)
+            val out = IntArray(w * h)
+            for (i in out.indices) {
+                val a = edgeAlpha[i].coerceIn(0f, 1f)
+                if (a <= 0f) {
+                    out[i] = resultPixels[i] or -0x1000000
+                } else if (a >= 1f) {
+                    out[i] = previewPixels[i] or -0x1000000
+                } else {
+                    val keep = 1f - a
+                    val resultColor = resultPixels[i]
+                    val previewColor = previewPixels[i]
+                    val r = (((resultColor ushr 16) and 0xff) * keep + ((previewColor ushr 16) and 0xff) * a).roundToInt().coerceIn(0, 255)
+                    val g = (((resultColor ushr 8) and 0xff) * keep + ((previewColor ushr 8) and 0xff) * a).roundToInt().coerceIn(0, 255)
+                    val b = ((resultColor and 0xff) * keep + (previewColor and 0xff) * a).roundToInt().coerceIn(0, 255)
+                    out[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
+                }
+            }
+            Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+        } catch (exc: Exception) {
+            Log.w(TAG, "Display edge composite failed: ${exc.message}")
+            result
+        }
+    }
+
+    private fun Bitmap.fitTo(w: Int, h: Int): Bitmap =
+        if (width == w && height == h) this else Bitmap.createScaledBitmap(this, w, h, true)
+
+    private fun peripheralBoundaryAlpha(peripheral: BooleanArray, w: Int, h: Int, featherPx: Int): FloatArray {
+        val n = w * h
+        val alpha = FloatArray(n)
+        if (featherPx <= 0) return alpha
+        val seen = BooleanArray(n)
+        val frontier = IntArray(n)
+        val next = IntArray(n)
+        var frontierCount = 0
+
+        fun seed(idx: Int) {
+            if (idx < 0 || idx >= n || seen[idx]) return
+            seen[idx] = true
+            alpha[idx] = 1f
+            frontier[frontierCount++] = idx
+        }
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val idx = y * w + x
+                if (x < w - 1) {
+                    val right = idx + 1
+                    if (peripheral[idx] != peripheral[right]) {
+                        seed(idx)
+                        seed(right)
+                    }
+                }
+                if (y < h - 1) {
+                    val down = idx + w
+                    if (peripheral[idx] != peripheral[down]) {
+                        seed(idx)
+                        seed(down)
+                    }
+                }
+            }
+        }
+
+        fun add(idx: Int, value: Float, nextCount: Int): Int {
+            if (idx < 0 || idx >= n || seen[idx]) return nextCount
+            seen[idx] = true
+            alpha[idx] = value
+            next[nextCount] = idx
+            return nextCount + 1
+        }
+
+        var count = frontierCount
+        for (step in 1..featherPx) {
+            val t = 1f - (step.toFloat() / (featherPx + 1f))
+            val smooth = t * t * (3f - 2f * t)
+            var nextCount = 0
+            for (i in 0 until count) {
+                val idx = frontier[i]
+                val x = idx % w
+                val y = idx / w
+                if (x > 0) nextCount = add(idx - 1, smooth, nextCount)
+                if (x < w - 1) nextCount = add(idx + 1, smooth, nextCount)
+                if (y > 0) nextCount = add(idx - w, smooth, nextCount)
+                if (y < h - 1) nextCount = add(idx + w, smooth, nextCount)
+                if (x > 0 && y > 0) nextCount = add(idx - w - 1, smooth, nextCount)
+                if (x < w - 1 && y > 0) nextCount = add(idx - w + 1, smooth, nextCount)
+                if (x > 0 && y < h - 1) nextCount = add(idx + w - 1, smooth, nextCount)
+                if (x < w - 1 && y < h - 1) nextCount = add(idx + w + 1, smooth, nextCount)
+            }
+            for (i in 0 until nextCount) frontier[i] = next[i]
+            count = nextCount
+            if (count == 0) break
+        }
+        return alpha
+    }
+
+    private fun postJson(url: String, body: JSONObject, timeoutMs: Int): JSONObject {
+        val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = timeoutMs
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Length", bytes.size.toString())
+        }
+        conn.outputStream.use { it.write(bytes) }
+        val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.use {
+            BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+        }.orEmpty()
+        if (conn.responseCode !in 200..299) {
+            throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+        }
+        return JSONObject(text)
+    }
+
+    private data class IngestSplatResult(
+        val photo: AlbumPhoto,
+        val store: SplatCache.StoreResult,
+        val records: Int,
+        val sizeBytes: Long
+    )
+
+    private fun postIngestSplat(photo: AlbumPhoto): IngestSplatResult {
+        val imageUri = photo.localUri ?: throw IllegalArgumentException("imported photo has no local URI")
+        val boundary = "----WiciAndroidAlbum${SystemClock.elapsedRealtimeNanos()}"
+        val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
+        val filename = "android-import-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        val requestedPhotoId = photo.photoId
+        val initialKey = SplatCache.keyFor(requestedPhotoId, DEFAULT_SPLAT_DENSITY)
+        var tmp = SplatCache.tempFile(this, initialKey)
+        val conn = (URL("$GALLERY_URL/ingest").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = 300_000
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setRequestProperty("Accept", "application/octet-stream")
+        }
+        try {
+            conn.outputStream.use { out ->
+                writeMultipartText(out, boundary, "photoId", requestedPhotoId)
+                writeMultipartText(out, boundary, "title", requestedPhotoId)
+                out.writeUtf8("--$boundary\r\n")
+                out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"$filename\"\r\n")
+                out.writeUtf8("Content-Type: $mime\r\n\r\n")
+                contentResolver.openInputStream(imageUri).use { input ->
+                    requireNotNull(input) { "openInputStream returned null" }
+                    input.copyTo(out)
+                }
+                out.writeUtf8("\r\n--$boundary--\r\n")
+            }
+
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            if (conn.responseCode !in 200..299) {
+                val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+                throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+            }
+
+            tmp.outputStream().use { out ->
+                requireNotNull(stream) { "ingest response body missing" }.use { input -> input.copyTo(out) }
+            }
+            val bytes = tmp.length()
+            if (bytes <= 0L) throw RuntimeException("empty ingest splat response")
+            if (bytes % SPLAT_ROW_BYTES != 0L) {
+                throw RuntimeException("ingest splat bytes $bytes not divisible by $SPLAT_ROW_BYTES")
+            }
+
+            val returnedPhotoId = conn.headerString("X-Ingest-Photo-Id")?.takeIf { it.isNotBlank() } ?: requestedPhotoId
+            val cacheKey = SplatCache.keyFor(returnedPhotoId, DEFAULT_SPLAT_DENSITY)
+            val records = conn.headerInt("X-Splat-Num-Gaussians") ?: (bytes / SPLAT_ROW_BYTES).toInt()
+            val headerBytes = conn.headerLong("X-Splat-Size-Bytes") ?: bytes
+            if (headerBytes != bytes) {
+                Log.w(TAG, "Ingest size header mismatch photoId=$returnedPhotoId header=$headerBytes actual=$bytes")
+            }
+            val store = SplatCache.commit(this, cacheKey, tmp, splatCacheMaxBytesOverride ?: SplatCache.DEFAULT_MAX_BYTES)
+            tmp = File("")
+            if (!store.stored) {
+                throw RuntimeException("ingest splat was not cached: ${store.reason ?: "unknown"}")
+            }
+            val baked = photo.copy(
+                photoId = returnedPhotoId,
+                hasSplat = true,
+                sourceWidth = conn.headerInt("X-Src-Width") ?: photo.sourceWidth,
+                sourceHeight = conn.headerInt("X-Src-Height") ?: photo.sourceHeight,
+                camFx = conn.headerFloat("X-Cam-Fx") ?: photo.camFx,
+                camFy = conn.headerFloat("X-Cam-Fy") ?: photo.camFy,
+                camCx = conn.headerFloat("X-Cam-Cx") ?: photo.camCx,
+                camCy = conn.headerFloat("X-Cam-Cy") ?: photo.camCy,
+                splatStreamUrl = null,
+                splatUrl = null,
+                imported = true
+            )
+            Log.i(
+                TAG,
+                "Ingest splat received photoId=$returnedPhotoId records=$records bytes=$bytes " +
+                    "camera=${baked.sourceWidth}x${baked.sourceHeight} fx=${baked.camFx} fy=${baked.camFy} " +
+                    "stored=${store.stored} totalBytes=${store.totalBytes} evicted=${store.evictedCount}"
+            )
+            return IngestSplatResult(baked, store, records, bytes)
+        } finally {
+            if (tmp.path.isNotEmpty() && tmp.exists()) tmp.delete()
+            conn.disconnect()
+        }
+    }
+
+    private fun postIngest(imageUri: Uri): JSONObject {
+        val boundary = "----WiciAndroidAlbum${SystemClock.elapsedRealtimeNanos()}"
+        val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
+        val filename = "android-import-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        val conn = (URL("$GALLERY_URL/ingest").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = 300_000
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setRequestProperty("Accept", "application/json")
+        }
+        try {
+            conn.outputStream.use { out ->
+                out.writeUtf8("--$boundary\r\n")
+                out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"$filename\"\r\n")
+                out.writeUtf8("Content-Type: $mime\r\n\r\n")
+                contentResolver.openInputStream(imageUri).use { input ->
+                    requireNotNull(input) { "openInputStream returned null" }
+                    input.copyTo(out)
+                }
+                out.writeUtf8("\r\n--$boundary--\r\n")
+            }
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.use {
+                BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            if (conn.responseCode !in 200..299) {
+                throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+            }
+            return JSONObject(text)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun writeMultipartText(out: OutputStream, boundary: String, name: String, value: String) {
+        out.writeUtf8("--$boundary\r\n")
+        out.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+        out.writeUtf8(value)
+        out.writeUtf8("\r\n")
+    }
+
+    private fun OutputStream.writeUtf8(value: String) {
+        write(value.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    private fun extensionForMime(mime: String): String =
+        when {
+            mime.contains("png", ignoreCase = true) -> "png"
+            mime.contains("webp", ignoreCase = true) -> "webp"
+            else -> "jpg"
+        }
+
+    private fun photoFromIngestResponse(item: JSONObject, previous: AlbumPhoto): AlbumPhoto {
+        val photoId = item.optString("photoId").trim().ifEmpty { previous.photoId }
+        val fallbackDims = legacySourceDims(photoId)
+        return AlbumPhoto(
+            photoId = photoId,
+            thumbnailUrl = firstOptionalUrl(item, "thumbnailUrl", "thumbnail_url") ?: previous.thumbnailUrl,
+            hasOrbit = item.optBoolean("hasOrbit", previous.hasOrbit),
+            hasSplat = item.optBoolean("hasSplat", true),
+            sourceWidth = firstOptionalInt(item, "sourceWidth", "source_width", "width", "imageWidth")
+                ?: previous.sourceWidth
+                ?: fallbackDims?.first,
+            sourceHeight = firstOptionalInt(item, "sourceHeight", "source_height", "height", "imageHeight")
+                ?: previous.sourceHeight
+                ?: fallbackDims?.second,
+            camFx = firstOptionalFloat(item, "camFx", "cam_fx", "fx") ?: previous.camFx,
+            camFy = firstOptionalFloat(item, "camFy", "cam_fy", "fy") ?: previous.camFy,
+            camCx = firstOptionalFloat(item, "camCx", "cam_cx", "cx") ?: previous.camCx,
+            camCy = firstOptionalFloat(item, "camCy", "cam_cy", "cy") ?: previous.camCy,
+            sourceUrl = firstOptionalUrl(item, "sourceUrl", "source_url") ?: previous.sourceUrl,
+            orbitWebpUrl = firstOptionalUrl(item, "orbitWebpUrl", "orbit_webp_url") ?: previous.orbitWebpUrl,
+            orbitPreviewUrl = firstOptionalUrl(item, "orbitPreviewUrl", "orbit_preview_url") ?: previous.orbitPreviewUrl,
+            splatStreamUrl = firstOptionalUrl(item, "splatStreamUrl", "splat_stream_url") ?: previous.splatStreamUrl,
+            splatUrl = firstOptionalUrl(item, "splatUrl", "splat_url") ?: previous.splatUrl,
+            localUri = previous.localUri,
+            imported = true
+        )
+    }
+
+    private fun replaceImportedPhoto(oldPhotoId: String, next: AlbumPhoto) {
+        val index = importedPhotos.indexOfFirst { it.photoId == oldPhotoId }
+        if (index >= 0) {
+            importedPhotos[index] = next
+        } else {
+            importedPhotos.add(0, next)
+        }
+        val curated = albumPhotos.filterNot { it.imported || it.photoId == oldPhotoId || it.photoId == next.photoId }
+        albumPhotos = importedPhotos + curated
+        thumbnailCache.remove(oldPhotoId)
+        albumAdapter?.setPhotos(albumPhotos)
+        albumStatus?.text = momentCountText()
+    }
+
+    private fun getText(url: String, timeoutMs: Int): String {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 4_000
+            readTimeout = timeoutMs
+            setRequestProperty("Accept", "application/json")
+        }
+        try {
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.use {
+                BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            if (conn.responseCode !in 200..299) {
+                throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+            }
+            return text
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun fetchBitmap(url: String): Bitmap {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 4_000
+            readTimeout = 12_000
+        }
+        try {
+            if (conn.responseCode !in 200..299) {
+                throw RuntimeException("HTTP ${conn.responseCode}")
+            }
+            return conn.inputStream.use { input ->
+                BitmapFactory.decodeStream(input)
+            } ?: throw RuntimeException("decode failed")
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun decodeLocalBitmap(uri: Uri, maxSide: Int): Bitmap {
+        val source = ImageDecoder.createSource(contentResolver, uri)
+        return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            val width = info.size.width.coerceAtLeast(1)
+            val height = info.size.height.coerceAtLeast(1)
+            val scale = min(1f, maxSide.toFloat() / maxOf(width, height).toFloat())
+            if (scale < 1f) {
+                decoder.setTargetSize((width * scale).toInt().coerceAtLeast(1), (height * scale).toInt().coerceAtLeast(1))
+            }
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    }
+
+    private fun decodeDataUrl(value: String): Bitmap {
+        val encoded = value.substringAfter(",", value)
+        val bytes = Base64.decode(encoded, Base64.DEFAULT)
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw IllegalArgumentException("failed to decode image")
+    }
+
+    private fun localSourceDataUrl(photo: AlbumPhoto): String {
+        synchronized(localSourceDataUrlCache) {
+            localSourceDataUrlCache[photo.photoId]?.let { return it }
+        }
+        val uri = photo.localUri ?: throw IllegalArgumentException("imported photo has no local URI")
+        val bitmap = decodeLocalBitmap(uri, DISPLAY_IMAGE_MAX_SIDE)
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+        val dataUrl = "data:image/jpeg;base64,${Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)}"
+        synchronized(localSourceDataUrlCache) {
+            localSourceDataUrlCache[photo.photoId] = dataUrl
+        }
+        Log.i(TAG, "Local source encoded photoId=${photo.photoId} chars=${dataUrl.length} bitmap=${bitmap.width}x${bitmap.height}")
+        return dataUrl
+    }
+
+    private fun loadRemovedCuratedPhotoIds(): Set<String> =
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getStringSet(PREF_REMOVED_CURATED_IDS, emptySet())
+            ?.toSet()
+            .orEmpty()
+
+    private fun saveRemovedCuratedPhotoIds() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putStringSet(PREF_REMOVED_CURATED_IDS, removedCuratedPhotoIds.toSet())
+            .apply()
+    }
+
+    private fun loadAssetBitmap(assetName: String): Bitmap? =
+        try {
+            assets.open(assetName).use { BitmapFactory.decodeStream(it) }
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun inter(weight: Int = 400): Typeface =
+        Typeface.create(interBase, weight, false)
+
+    private fun spaceGrotesk(weight: Int = 700): Typeface =
+        Typeface.create(spaceGroteskBase, weight, false)
+
+    private fun momentCountText(): String =
+        "${albumPhotos.size} MOMENTS"
+
+    private fun stylePreviewToggle(view: TextView, enabled: Boolean) {
+        view.setTextColor(if (enabled) Color.WHITE else COLOR_INK)
+        view.background = if (enabled) {
+            roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(19).toFloat())
+        } else {
+            rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+        }
+        applySoftShadow(view, if (enabled) 3 else 2)
+    }
+
+    private fun studioBackButton(): View =
+        ChevronButton(this).apply {
+            contentDescription = "back"
+            isClickable = true
+            isFocusable = true
+            background = rounded(COLOR_SURFACE, dp(22).toFloat())
+            applySoftShadow(this, 3)
+            setOnClickListener { showAlbum() }
+        }
+
+    private fun primaryGenerateButton(): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumWidth = dp(178)
+            minimumHeight = dp(52)
+            setPadding(dp(24), 0, dp(24), 0)
+            isClickable = true
+            isFocusable = true
+            applySoftShadow(this, 4)
+            setOnClickListener { handleStageAction() }
+            generateSpinner = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleSmall).apply {
+                isIndeterminate = true
+                indeterminateTintList = ColorStateList.valueOf(COLOR_INK_SOFT)
+                visibility = View.GONE
+            }
+            generateLabel = TextView(this@MainActivity).apply {
+                textSize = 15f
+                typeface = inter(700)
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                compoundDrawablePadding = dp(7)
+            }
+            addView(
+                generateSpinner,
+                LinearLayout.LayoutParams(dp(20), dp(20)).apply {
+                    rightMargin = dp(8)
+                }
+            )
+            addView(
+                generateLabel,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+    private fun handleStageAction() {
+        when (displayMode) {
+            DisplayMode.RAW -> Unit
+            DisplayMode.DIFIX -> generateFlux()
+            DisplayMode.FLUX -> saveFinalImage()
+        }
+    }
+
+    private fun updateViewerControls() {
+        if (!::generateButton.isInitialized) return
+        if (displayMode == DisplayMode.DIFIX && difixDataUrl == null) displayMode = DisplayMode.RAW
+        if (displayMode == DisplayMode.FLUX && fluxDataUrl == null) {
+            displayMode = if (difixDataUrl != null) DisplayMode.DIFIX else DisplayMode.RAW
+        }
+        val hasDifix = difixDataUrl != null
+        val hasFlux = fluxDataUrl != null
+        when {
+            fluxBusy -> styleStageButton("Generating...", enabled = false, busy = true)
+            hasFlux && displayMode == DisplayMode.FLUX -> styleStageButton("Download", enabled = true, busy = false)
+            hasDifix && displayMode == DisplayMode.DIFIX -> styleStageButton("Generate", enabled = true, busy = false)
+            else -> styleStageButton("Generate", enabled = false, busy = false)
+        }
+    }
+
+    private fun styleStageButton(label: String, enabled: Boolean, busy: Boolean) {
+        generateButton.isEnabled = enabled
+        generateButton.isClickable = enabled
+        generateButton.alpha = 1f
+        generateButton.background = when {
+            enabled -> roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(26).toFloat(), dpFloat(1.2f), COLOR_HAIRLINE)
+            busy -> rounded(COLOR_SURFACE, dp(26).toFloat(), dpFloat(1.2f), COLOR_HAIRLINE)
+            else -> rounded(0xFFE6E8EE.toInt(), dp(26).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+        }
+        generateSpinner.visibility = if (busy) View.VISIBLE else View.GONE
+        generateLabel.text = label
+        generateLabel.setTextColor(if (enabled || busy) COLOR_INK else COLOR_INK_SOFT)
+        generateLabel.setCompoundDrawables(null, null, null, null)
+    }
+
+    private fun setInlineStatus(view: TextView, message: String) {
+        view.text = message
+        view.visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+        if (message.isNotBlank()) {
+            view.background = rounded(0xEFFFFFFF.toInt(), dp(18).toFloat())
+            applySoftShadow(view, 2)
+        }
+    }
+
+    private fun fitPlateToBitmap(plate: View, bitmapWidth: Int, bitmapHeight: Int, horizontalMargin: Int, topMargin: Int, bottomMargin: Int) {
+        plate.post {
+            val parent = plate.parent as? View ?: return@post
+            val maxW = (parent.width - horizontalMargin * 2).coerceAtLeast(1)
+            val maxH = (parent.height - topMargin - bottomMargin).coerceAtLeast(1)
+            val scale = min(maxW.toFloat() / bitmapWidth.coerceAtLeast(1), maxH.toFloat() / bitmapHeight.coerceAtLeast(1))
+            val lp = (plate.layoutParams as? FrameLayout.LayoutParams) ?: return@post
+            lp.width = (bitmapWidth * scale).roundToInt().coerceAtLeast(1)
+            lp.height = (bitmapHeight * scale).roundToInt().coerceAtLeast(1)
+            lp.gravity = Gravity.CENTER
+            lp.leftMargin = horizontalMargin
+            lp.rightMargin = horizontalMargin
+            lp.topMargin = topMargin
+            lp.bottomMargin = bottomMargin
+            plate.layoutParams = lp
+        }
+    }
+
+    private fun applySoftShadow(view: View, elevationDp: Int = 3) {
+        view.elevation = dp(elevationDp).toFloat()
+        view.translationZ = 0f
+        view.stateListAnimator = null
+    }
+
+    private fun rounded(
+        color: Int,
+        radius: Float,
+        strokeWidth: Float = 0f,
+        strokeColor: Int = Color.TRANSPARENT
+    ): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius
+            if (strokeWidth > 0f) {
+                setStroke(strokeWidth.roundToInt().coerceAtLeast(1), strokeColor)
+            }
+        }
+
+    private fun roundedState(
+        normalColor: Int,
+        pressedColor: Int,
+        radius: Float,
+        strokeWidth: Float = 0f,
+        strokeColor: Int = Color.TRANSPARENT
+    ): StateListDrawable =
+        StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), rounded(pressedColor, radius, strokeWidth, strokeColor))
+            addState(intArrayOf(-android.R.attr.state_enabled), rounded(COLOR_HAIRLINE, radius, strokeWidth, strokeColor))
+            addState(intArrayOf(), rounded(normalColor, radius, strokeWidth, strokeColor))
+        }
+
+    private fun absoluteGalleryUrl(pathOrUrl: String): String =
+        when {
+            pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://") -> pathOrUrl
+            pathOrUrl.startsWith("/") -> "$GALLERY_URL$pathOrUrl"
+            else -> "$GALLERY_URL/$pathOrUrl"
+        }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun dpFloat(value: Float): Float =
+        value * resources.displayMetrics.density
+
+    private fun applyFullscreen(root: View) {
+        root.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            )
+    }
+
+    private fun photoIdForAsset(name: String): String =
+        when {
+            name.contains("phone-photo-man", ignoreCase = true) -> "phone-photo-man"
+            else -> name.substringBeforeLast(".")
+        }
+
+    private fun optionalInt(item: JSONObject, key: String): Int? {
+        if (!item.has(key) || item.isNull(key)) return null
+        return item.optInt(key).takeIf { it > 0 }
+    }
+
+    private fun firstOptionalInt(item: JSONObject, vararg keys: String): Int? {
+        for (key in keys) {
+            optionalInt(item, key)?.let { return it }
+        }
+        return null
+    }
+
+    private fun optionalFloat(item: JSONObject, key: String): Float? {
+        if (!item.has(key) || item.isNull(key)) return null
+        val value = item.optDouble(key, Double.NaN).toFloat()
+        return value.takeIf { it.isFinite() && it > 0f }
+    }
+
+    private fun firstOptionalFloat(item: JSONObject, vararg keys: String): Float? {
+        for (key in keys) {
+            optionalFloat(item, key)?.let { return it }
+        }
+        return null
+    }
+
+    private fun firstOptionalUrl(item: JSONObject, vararg keys: String): String? {
+        for (key in keys) {
+            if (!item.has(key) || item.isNull(key)) continue
+            val value = item.optString(key).trim()
+            if (value.isNotEmpty()) return absoluteGalleryUrl(value)
+        }
+        return null
+    }
+
+    private fun HttpURLConnection.headerString(name: String): String? =
+        getHeaderField(name)?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun HttpURLConnection.headerInt(name: String): Int? =
+        headerString(name)?.toIntOrNull()?.takeIf { it > 0 }
+
+    private fun HttpURLConnection.headerLong(name: String): Long? =
+        headerString(name)?.toLongOrNull()?.takeIf { it > 0L }
+
+    private fun HttpURLConnection.headerFloat(name: String): Float? =
+        headerString(name)?.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+
+    private fun intentPositiveFloat(key: String): Float? =
+        if (intent.hasExtra(key)) {
+            intent.getFloatExtra(key, Float.NaN).takeIf { it.isFinite() && it > 0f }
+        } else {
+            null
+        }
+
+    private fun sourceDimsFromIntent(): Pair<Int, Int>? {
+        val width = intent.getIntExtra("sourceWidth", 0).takeIf { it > 0 }
+            ?: intent.getIntExtra("width", 0).takeIf { it > 0 }
+        val height = intent.getIntExtra("sourceHeight", 0).takeIf { it > 0 }
+            ?: intent.getIntExtra("height", 0).takeIf { it > 0 }
+        return if (width != null && height != null) width to height else null
+    }
+
+    private fun legacySourceDims(photoId: String): Pair<Int, Int>? =
+        when (photoId) {
+            "phone-photo-man" -> 1920 to 1280
+            "cafe-couple-bench" -> 1920 to 2886
+            "01-woman-portrait" -> 1600 to 2400
+            "02-man-stairs" -> 1600 to 2400
+            "03-man-window" -> 1600 to 2400
+            "04-family-street" -> 1600 to 2400
+            "05-street-crowd" -> 1600 to 2400
+            "06-woman-street" -> 1600 to 2400
+            "07-forest-path" -> 1600 to 2415
+            "08-autumn-trail" -> 1600 to 2400
+            "09-dog-grass" -> 1600 to 1067
+            "10-poodle-park" -> 1600 to 2843
+            "wm-people-01-pilgrim-valletta" -> 1205 to 1800
+            "wm-people-02-fishmonger-market" -> 1800 to 1198
+            "wm-people-03-red-yukata-gion" -> 1800 to 1200
+            "wm-people-04-shepherd-rajasthan" -> 1800 to 1200
+            "wm-landscape-01-hallasan-steps" -> 1800 to 1216
+            "wm-landscape-02-blue-lake-cook" -> 1800 to 1245
+            "wm-landscape-03-lake-gosaikunda" -> 1800 to 1201
+            "wm-landscape-04-chola-valley" -> 1800 to 1200
+            "wm-street-01-madhya-pradesh-04" -> 1800 to 1200
+            "wm-street-02-madhya-pradesh-06" -> 1800 to 1200
+            "wm-street-03-madhya-pradesh-13" -> 1800 to 1200
+            else -> null
+        }
+
+    private fun sourcePathForAsset(name: String): String? =
+        if (name.contains("phone-photo-man", ignoreCase = true)) {
+            "/home/wici/spatial-reframing/spatial-viewer/plys/phone-photo-man-original.jpg"
+        } else {
+            null
+        }
+
+    private enum class DisplayMode {
+        RAW,
+        DIFIX,
+        FLUX
+    }
+
+    private class ChevronButton(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = COLOR_INK
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = 2.2f * context.resources.displayMetrics.density
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            canvas.drawLine(w * 0.58f, h * 0.32f, w * 0.42f, h * 0.5f, paint)
+            canvas.drawLine(w * 0.42f, h * 0.5f, w * 0.58f, h * 0.68f, paint)
+        }
+    }
+
+    private class DeleteBadgeView(context: Context) : View(context) {
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = COLOR_DELETE
+            style = Paint.Style.FILL
+        }
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x22FFFFFF
+            style = Paint.Style.STROKE
+            strokeWidth = 1f * context.resources.displayMetrics.density
+        }
+        private val xPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = 1.9f * context.resources.displayMetrics.density
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val radius = min(width, height) * 0.5f
+            val cx = width * 0.5f
+            val cy = height * 0.5f
+            canvas.drawCircle(cx, cy, radius - strokePaint.strokeWidth, fillPaint)
+            canvas.drawCircle(cx, cy, radius - strokePaint.strokeWidth, strokePaint)
+            val inset = radius * 0.42f
+            canvas.drawLine(cx - inset, cy - inset, cx + inset, cy + inset, xPaint)
+            canvas.drawLine(cx + inset, cy - inset, cx - inset, cy + inset, xPaint)
+        }
+    }
+
+    private data class AlbumPhoto(
+        val photoId: String,
+        val thumbnailUrl: String,
+        val hasOrbit: Boolean,
+        val hasSplat: Boolean,
+        val sourceWidth: Int?,
+        val sourceHeight: Int?,
+        val camFx: Float?,
+        val camFy: Float?,
+        val camCx: Float?,
+        val camCy: Float?,
+        val sourceUrl: String? = null,
+        val orbitWebpUrl: String? = null,
+        val orbitPreviewUrl: String? = null,
+        val splatStreamUrl: String? = null,
+        val splatUrl: String? = null,
+        val localUri: Uri? = null,
+        val imported: Boolean = false
+    ) {
+        val splatAsset: String get() = "$photoId.splat"
+    }
+
+    private open class SquareFrameLayout(context: Context) : FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = MeasureSpec.getSize(widthMeasureSpec)
+            val square = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY)
+            super.onMeasure(widthMeasureSpec, square)
+        }
+    }
+
+    companion object {
+        private const val TAG = "AlbumPipeline"
+        private const val PREVIEW_TAG = "AlbumPreview"
+        private const val PREFS_NAME = "android-album-demo"
+        private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
+        private const val ADD_TILE_ID = "__add_photo__"
+        private const val SHOW_RENDER_DEBUG = false
+        private const val DISPLAY_EDGE_FEATHER_PX = 24
+        private const val EDIT_JIGGLE_DEGREES = 1.5f
+        private const val EDIT_JIGGLE_DURATION_MS = 150L
+        private const val EDIT_LONG_PRESS_MS = 520L
+        private val COLOR_CANVAS = 0xFFF2F3F5.toInt()
+        private val COLOR_SURFACE = 0xFFFFFFFF.toInt()
+        private val COLOR_INK = 0xFF16171A.toInt()
+        private val COLOR_INK_SOFT = 0xFF6B6E76.toInt()
+        private val COLOR_HAIRLINE = 0xFFE2E4E8.toInt()
+        private val COLOR_ACCENT = 0xFF5B5BFF.toInt()
+        private val COLOR_ACCENT_PRESS = 0xFF4A47E0.toInt()
+        private val COLOR_DELETE = 0xFFFF3B30.toInt()
+        private const val DIFIX_URL = "http://47.186.21.5:54228/difix"
+        private const val FLUX_URL = "http://47.186.21.5:54228/flux"
+        private const val GALLERY_URL = "http://47.186.21.5:54228/orbit"
+        private const val ORBIT_PREVIEW_URL = "http://47.186.21.5:54228/orbit/orbit_preview"
+        private const val ORBIT_PREVIEW_CACHE_VERSION = "webp360-v1"
+        private const val DEFAULT_SPLAT_DENSITY = "full"
+        private const val SPLAT_ROW_BYTES = 32
+        private const val PREVIEW_CASCADE_STAGGER_MS = 120L
+        private const val PREVIEW_REVEAL_MS = 300L
+        private const val PREVIEW_REVEAL_START_SCALE = 0.96f
+        private const val REQUEST_PICK_IMAGES = 4201
+        private const val PICK_IMAGES_MAX = 100
+        private const val THUMBNAIL_MAX_SIDE = 720
+        private const val DISPLAY_IMAGE_MAX_SIDE = 3200
+    }
+}
