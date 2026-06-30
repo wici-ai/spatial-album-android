@@ -834,6 +834,32 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun buildFullReframeUploadJpeg(photoId: String, imageUri: Uri): ByteArray? {
+        var bitmap: Bitmap? = null
+        return try {
+            bitmap = decodeLocalBitmap(imageUri, PREVIEW_UPLOAD_MAX_SIDE)
+            val bytes = ByteArrayOutputStream()
+            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, PREVIEW_UPLOAD_JPEG_QUALITY, bytes)
+            if (!ok) throw RuntimeException("JPEG compress returned false")
+            val payload = bytes.toByteArray()
+            Log.i(
+                TAG,
+                "Ingest upload downscaled photoId=$photoId " +
+                    "bitmap=${bitmap.width}x${bitmap.height} bytes=${payload.size}"
+            )
+            payload
+        } catch (exc: Exception) {
+            Log.w(
+                TAG,
+                "Ingest upload downscale failed photoId=$photoId; falling back to raw upload: ${exc.message}",
+                exc
+            )
+            null
+        } finally {
+            bitmap?.recycle()
+        }
+    }
+
     private fun pruneOrbitPreviewCache() {
         val files = cacheDir.listFiles { file ->
             file.isFile && file.name.startsWith("orbit-preview-") && file.name.endsWith(".webp")
@@ -2090,10 +2116,24 @@ class MainActivity : Activity() {
         val imageUri = photo.localUri ?: throw IllegalArgumentException("imported photo has no local URI")
         val boundary = "----WiciAndroidAlbum${SystemClock.elapsedRealtimeNanos()}"
         val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
-        val filename = "android-import-${System.currentTimeMillis()}.${extensionForMime(mime)}"
         val requestedPhotoId = photo.photoId
+        val ingestUploadJpeg = buildFullReframeUploadJpeg(requestedPhotoId, imageUri)
+        val uploadMime = if (ingestUploadJpeg != null) "image/jpeg" else mime
+        val filename = if (ingestUploadJpeg != null) {
+            "android-import-${System.currentTimeMillis()}.jpg"
+        } else {
+            "android-import-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        }
         val initialKey = SplatCache.keyFor(requestedPhotoId, DEFAULT_SPLAT_DENSITY)
         var tmp = SplatCache.tempFile(this, initialKey)
+        val requestStartNs = SystemClock.elapsedRealtimeNanos()
+        var uploadImageBytes = ingestUploadJpeg?.size?.toLong() ?: -1L
+        var uploadWriteMs = -1L
+        var responseWaitMs = -1L
+        var downloadMs = -1L
+        var commitMs = -1L
+        var serverTimingJson: String? = null
+        var serverSharpMs: Double? = null
         val conn = (URL("$GALLERY_URL/ingest").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8_000
@@ -2103,28 +2143,41 @@ class MainActivity : Activity() {
             setRequestProperty("Accept", "application/octet-stream")
         }
         try {
+            val uploadStartNs = SystemClock.elapsedRealtimeNanos()
             conn.outputStream.use { out ->
                 writeMultipartText(out, boundary, "photoId", requestedPhotoId)
                 writeMultipartText(out, boundary, "title", requestedPhotoId)
                 out.writeUtf8("--$boundary\r\n")
                 out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"$filename\"\r\n")
-                out.writeUtf8("Content-Type: $mime\r\n\r\n")
-                contentResolver.openInputStream(imageUri).use { input ->
-                    requireNotNull(input) { "openInputStream returned null" }
-                    input.copyTo(out)
+                out.writeUtf8("Content-Type: $uploadMime\r\n\r\n")
+                if (ingestUploadJpeg != null) {
+                    out.write(ingestUploadJpeg)
+                } else {
+                    contentResolver.openInputStream(imageUri).use { input ->
+                        requireNotNull(input) { "openInputStream returned null" }
+                        uploadImageBytes = input.copyTo(out)
+                    }
                 }
                 out.writeUtf8("\r\n--$boundary--\r\n")
             }
+            uploadWriteMs = elapsedMs(uploadStartNs)
 
-            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
-            if (conn.responseCode !in 200..299) {
+            val responseWaitStartNs = SystemClock.elapsedRealtimeNanos()
+            val code = conn.responseCode
+            responseWaitMs = elapsedMs(responseWaitStartNs)
+            serverTimingJson = conn.headerString("X-Orbit-Timing-Json")
+            serverSharpMs = parseIngestSharpMs(serverTimingJson)
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            if (code !in 200..299) {
                 val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
-                throw RuntimeException("HTTP ${conn.responseCode}: ${text.take(220)}")
+                throw RuntimeException("HTTP $code: ${text.take(220)}")
             }
 
+            val downloadStartNs = SystemClock.elapsedRealtimeNanos()
             tmp.outputStream().use { out ->
                 requireNotNull(stream) { "ingest response body missing" }.use { input -> input.copyTo(out) }
             }
+            downloadMs = elapsedMs(downloadStartNs)
             val bytes = tmp.length()
             if (bytes <= 0L) throw RuntimeException("empty ingest splat response")
             if (bytes % SPLAT_ROW_BYTES != 0L) {
@@ -2138,7 +2191,9 @@ class MainActivity : Activity() {
             if (headerBytes != bytes) {
                 Log.w(TAG, "Ingest size header mismatch photoId=$returnedPhotoId header=$headerBytes actual=$bytes")
             }
+            val commitStartNs = SystemClock.elapsedRealtimeNanos()
             val store = SplatCache.commit(this, cacheKey, tmp, splatCacheMaxBytesOverride ?: SplatCache.DEFAULT_MAX_BYTES)
+            commitMs = elapsedMs(commitStartNs)
             tmp = File("")
             if (!store.stored) {
                 throw RuntimeException("ingest splat was not cached: ${store.reason ?: "unknown"}")
@@ -2161,6 +2216,18 @@ class MainActivity : Activity() {
                 "Ingest splat received photoId=$returnedPhotoId records=$records bytes=$bytes " +
                     "camera=${baked.sourceWidth}x${baked.sourceHeight} fx=${baked.camFx} fy=${baked.camFy} " +
                     "stored=${store.stored} totalBytes=${store.totalBytes} evicted=${store.evictedCount}"
+            )
+            val totalMs = elapsedMs(requestStartNs)
+            val downloadMb = bytes.toDouble() / (1024.0 * 1024.0)
+            val downloadMbps = if (downloadMs > 0L) downloadMb / (downloadMs.toDouble() / 1000.0) else 0.0
+            Log.i(
+                TAG,
+                "Ingest profile photoId=$returnedPhotoId uploadMode=${if (ingestUploadJpeg != null) "jpeg1536" else "raw"} " +
+                    "uploadImageBytes=$uploadImageBytes uploadWriteMs=$uploadWriteMs " +
+                    "responseWaitMs=$responseWaitMs serverSharpMs=${serverSharpMs?.let { "%.1f".format(it) } ?: "-"} " +
+                    "downloadMs=$downloadMs downloadBytes=$bytes downloadMB=${"%.2f".format(downloadMb)} " +
+                    "downloadMBps=${"%.2f".format(downloadMbps)} commitMs=$commitMs totalMs=$totalMs " +
+                    "serverTiming=${serverTimingJson?.take(240) ?: "-"}"
             )
             return IngestSplatResult(baked, store, records, bytes)
         } finally {
@@ -2616,6 +2683,27 @@ class MainActivity : Activity() {
 
     private fun HttpURLConnection.headerFloat(name: String): Float? =
         headerString(name)?.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+
+    private fun elapsedMs(startNs: Long): Long =
+        (SystemClock.elapsedRealtimeNanos() - startNs) / 1_000_000L
+
+    private fun parseIngestSharpMs(timingJson: String?): Double? {
+        if (timingJson.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(timingJson)
+            val sharpServerSeconds = json.optJSONObject("sharpServer")?.optDouble("seconds", Double.NaN)
+            val seconds = listOf(
+                sharpServerSeconds,
+                json.optDouble("sharpInprocSeconds", Double.NaN),
+                json.optDouble("sharpHttpSeconds", Double.NaN),
+                json.optDouble("sharpServerSeconds", Double.NaN)
+            ).firstOrNull { it != null && it.isFinite() && it >= 0.0 }
+            seconds?.times(1000.0)
+        } catch (exc: Exception) {
+            Log.w(TAG, "Failed to parse ingest timing header: ${exc.message}")
+            null
+        }
+    }
 
     private fun intentPositiveFloat(key: String): Float? =
         if (intent.hasExtra(key)) {
