@@ -746,7 +746,13 @@ class MainActivity : Activity() {
         outFile.parentFile?.mkdirs()
         val boundary = "----WiciAndroidPreview${SystemClock.elapsedRealtimeNanos()}"
         val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
-        val filename = "android-preview-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        val previewUploadJpeg = buildPreviewUploadJpeg(photo.photoId, imageUri)
+        val uploadMime = if (previewUploadJpeg != null) "image/jpeg" else mime
+        val filename = if (previewUploadJpeg != null) {
+            "android-preview-${System.currentTimeMillis()}.jpg"
+        } else {
+            "android-preview-${System.currentTimeMillis()}.${extensionForMime(mime)}"
+        }
         val tmp = File(outFile.parentFile, "${outFile.name}.tmp-${SystemClock.elapsedRealtimeNanos()}")
         val conn = (URL("$GALLERY_URL/ingest_preview").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -762,10 +768,14 @@ class MainActivity : Activity() {
                 writeMultipartText(out, boundary, "title", photo.photoId)
                 out.writeUtf8("--$boundary\r\n")
                 out.writeUtf8("Content-Disposition: form-data; name=\"image\"; filename=\"$filename\"\r\n")
-                out.writeUtf8("Content-Type: $mime\r\n\r\n")
-                contentResolver.openInputStream(imageUri).use { input ->
-                    requireNotNull(input) { "openInputStream returned null" }
-                    input.copyTo(out)
+                out.writeUtf8("Content-Type: $uploadMime\r\n\r\n")
+                if (previewUploadJpeg != null) {
+                    out.write(previewUploadJpeg)
+                } else {
+                    contentResolver.openInputStream(imageUri).use { input ->
+                        requireNotNull(input) { "openInputStream returned null" }
+                        input.copyTo(out)
+                    }
                 }
                 out.writeUtf8("\r\n--$boundary--\r\n")
             }
@@ -795,6 +805,32 @@ class MainActivity : Activity() {
         } finally {
             if (tmp.exists()) tmp.delete()
             conn.disconnect()
+        }
+    }
+
+    private fun buildPreviewUploadJpeg(photoId: String, imageUri: Uri): ByteArray? {
+        var bitmap: Bitmap? = null
+        return try {
+            bitmap = decodeLocalBitmap(imageUri, PREVIEW_UPLOAD_MAX_SIDE)
+            val bytes = ByteArrayOutputStream()
+            val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, PREVIEW_UPLOAD_JPEG_QUALITY, bytes)
+            if (!ok) throw RuntimeException("JPEG compress returned false")
+            val payload = bytes.toByteArray()
+            Log.i(
+                PREVIEW_TAG,
+                "Orbit preview upload downscaled photoId=$photoId " +
+                    "bitmap=${bitmap.width}x${bitmap.height} bytes=${payload.size}"
+            )
+            payload
+        } catch (exc: Exception) {
+            Log.w(
+                PREVIEW_TAG,
+                "Orbit preview upload downscale failed photoId=$photoId; falling back to raw upload: ${exc.message}",
+                exc
+            )
+            null
+        } finally {
+            bitmap?.recycle()
         }
     }
 
@@ -2767,5 +2803,7 @@ class MainActivity : Activity() {
         private const val DEVICE_PHOTO_LIMIT = 600
         private const val THUMBNAIL_MAX_SIDE = 720
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
+        private const val PREVIEW_UPLOAD_MAX_SIDE = 1536
+        private const val PREVIEW_UPLOAD_JPEG_QUALITY = 90
     }
 }
