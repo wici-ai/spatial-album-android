@@ -2217,7 +2217,7 @@ class SplatRenderer(
         // Mirror the web viewer's GaussianSplats3D splatAlphaRemovalThreshold (SPLAT_ALPHA_THRESHOLD=5):
         // splats with stored alpha below this are dropped at parse time.
         private const val SPLAT_ALPHA_REMOVAL_THRESHOLD = 5
-        private const val STREAM_BATCH_RECORDS = 32_768
+        private const val STREAM_BATCH_RECORDS = 8_192
         private const val STREAM_READ_BYTES = 128 * 1024
         private const val INSTANCE_FLOATS = 14
         private const val LOW_PASS_VARIANCE = 0.35f
