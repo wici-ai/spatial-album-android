@@ -57,6 +57,7 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -2141,6 +2142,7 @@ class MainActivity : Activity() {
             doOutput = true
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty("Accept", "application/octet-stream")
+            setRequestProperty(INGEST_SPLAT_ACCEPT_HEADER, "$INGEST_SPLAT_FORMAT_FP16_V1,gzip")
         }
         try {
             val uploadStartNs = SystemClock.elapsedRealtimeNanos()
@@ -2165,8 +2167,13 @@ class MainActivity : Activity() {
             val responseWaitStartNs = SystemClock.elapsedRealtimeNanos()
             val code = conn.responseCode
             responseWaitMs = elapsedMs(responseWaitStartNs)
-            serverTimingJson = conn.headerString("X-Orbit-Timing-Json")
+            serverTimingJson = conn.headerString("X-Ingest-Timing-Json") ?: conn.headerString("X-Orbit-Timing-Json")
             serverSharpMs = parseIngestSharpMs(serverTimingJson)
+            val responseFormat = conn.headerString("X-Splat-Format") ?: SplatCache.FORMAT_SPLAT
+            val responseEncoding = conn.headerString("X-Splat-Encoding") ?: "identity"
+            val wireBytes = conn.headerLong("X-Splat-Size-Bytes") ?: conn.headerLong("Content-Length") ?: -1L
+            val payloadHeaderBytes = conn.headerLong("X-Splat-Payload-Size-Bytes")
+            val fp32EquivalentBytes = conn.headerLong("X-Splat-Fp32-Size-Bytes")
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             if (code !in 200..299) {
                 val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
@@ -2175,21 +2182,25 @@ class MainActivity : Activity() {
 
             val downloadStartNs = SystemClock.elapsedRealtimeNanos()
             tmp.outputStream().use { out ->
-                requireNotNull(stream) { "ingest response body missing" }.use { input -> input.copyTo(out) }
+                requireNotNull(stream) { "ingest response body missing" }.use { input ->
+                    val body = if (responseEncoding.equals("gzip", ignoreCase = true)) GZIPInputStream(input) else input
+                    body.use { decoded -> decoded.copyTo(out) }
+                }
             }
             downloadMs = elapsedMs(downloadStartNs)
             val bytes = tmp.length()
             if (bytes <= 0L) throw RuntimeException("empty ingest splat response")
-            if (bytes % SPLAT_ROW_BYTES != 0L) {
-                throw RuntimeException("ingest splat bytes $bytes not divisible by $SPLAT_ROW_BYTES")
-            }
+            val payloadInfo = SplatCache.inspect(tmp, SPLAT_ROW_BYTES)
+                ?: throw RuntimeException("invalid ingest splat payload bytes=$bytes format=$responseFormat encoding=$responseEncoding")
 
             val returnedPhotoId = conn.headerString("X-Ingest-Photo-Id")?.takeIf { it.isNotBlank() } ?: requestedPhotoId
             val cacheKey = SplatCache.keyFor(returnedPhotoId, DEFAULT_SPLAT_DENSITY)
-            val records = conn.headerInt("X-Splat-Num-Gaussians") ?: (bytes / SPLAT_ROW_BYTES).toInt()
-            val headerBytes = conn.headerLong("X-Splat-Size-Bytes") ?: bytes
-            if (headerBytes != bytes) {
-                Log.w(TAG, "Ingest size header mismatch photoId=$returnedPhotoId header=$headerBytes actual=$bytes")
+            val records = conn.headerInt("X-Splat-Num-Gaussians") ?: payloadInfo.records
+            if (records != payloadInfo.records) {
+                Log.w(TAG, "Ingest record header mismatch photoId=$returnedPhotoId header=$records payload=${payloadInfo.records}")
+            }
+            if (payloadHeaderBytes != null && payloadHeaderBytes != bytes) {
+                Log.w(TAG, "Ingest payload size header mismatch photoId=$returnedPhotoId header=$payloadHeaderBytes actual=$bytes")
             }
             val commitStartNs = SystemClock.elapsedRealtimeNanos()
             val store = SplatCache.commit(this, cacheKey, tmp, splatCacheMaxBytesOverride ?: SplatCache.DEFAULT_MAX_BYTES)
@@ -2218,15 +2229,18 @@ class MainActivity : Activity() {
                     "stored=${store.stored} totalBytes=${store.totalBytes} evicted=${store.evictedCount}"
             )
             val totalMs = elapsedMs(requestStartNs)
-            val downloadMb = bytes.toDouble() / (1024.0 * 1024.0)
+            val downloadWireBytes = wireBytes.takeIf { it > 0L } ?: bytes
+            val downloadMb = downloadWireBytes.toDouble() / (1024.0 * 1024.0)
             val downloadMbps = if (downloadMs > 0L) downloadMb / (downloadMs.toDouble() / 1000.0) else 0.0
             Log.i(
                 TAG,
                 "Ingest profile photoId=$returnedPhotoId uploadMode=${if (ingestUploadJpeg != null) "jpeg1536" else "raw"} " +
                     "uploadImageBytes=$uploadImageBytes uploadWriteMs=$uploadWriteMs " +
                     "responseWaitMs=$responseWaitMs serverSharpMs=${serverSharpMs?.let { "%.1f".format(it) } ?: "-"} " +
-                    "downloadMs=$downloadMs downloadBytes=$bytes downloadMB=${"%.2f".format(downloadMb)} " +
-                    "downloadMBps=${"%.2f".format(downloadMbps)} commitMs=$commitMs totalMs=$totalMs " +
+                    "splatFormat=${payloadInfo.format} responseFormat=$responseFormat responseEncoding=$responseEncoding " +
+                    "wireBytes=$wireBytes payloadBytes=$bytes fp32Bytes=${fp32EquivalentBytes ?: "-"} " +
+                    "downloadMs=$downloadMs downloadWireMB=${"%.2f".format(downloadMb)} " +
+                    "downloadWireMBps=${"%.2f".format(downloadMbps)} commitMs=$commitMs totalMs=$totalMs " +
                     "serverTiming=${serverTimingJson?.take(240) ?: "-"}"
             )
             return IngestSplatResult(baked, store, records, bytes)
@@ -2882,6 +2896,8 @@ class MainActivity : Activity() {
         private const val PREVIEW_BAKE_CONCURRENCY = 3
         private const val DEFAULT_SPLAT_DENSITY = "full"
         private const val SPLAT_ROW_BYTES = 32
+        private const val INGEST_SPLAT_ACCEPT_HEADER = "X-Wici-Splat-Accept"
+        private const val INGEST_SPLAT_FORMAT_FP16_V1 = "fp16v1"
         private const val PREVIEW_CASCADE_STAGGER_MS = 120L
         private const val PREVIEW_REVEAL_MS = 300L
         private const val PREVIEW_REVEAL_START_SCALE = 0.96f

@@ -6,6 +6,7 @@ import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.SystemClock
+import android.util.Half
 import android.util.Log
 import android.util.Base64
 import java.io.ByteArrayOutputStream
@@ -1085,11 +1086,13 @@ class SplatRenderer(
         Log.i(
             TAG,
             "splatCacheHit photoId=$streamId key=${entry.key} bytes=${entry.bytes} " +
-                "records=${entry.records} capBytes=$splatCacheMaxBytes"
+                "records=${entry.records} format=${entry.format} rowBytes=${entry.rowBytes} " +
+                "capBytes=$splatCacheMaxBytes"
         )
         try {
             val receivedRecords = entry.file.inputStream().use { input ->
-                consumeSplatInput(input, entry.records)
+                skipFully(input, entry.headerBytes.toLong())
+                consumeSplatInput(input, entry.records, rowBytes = entry.rowBytes, format = entry.format)
             }
             if (!streamCancelled.get()) {
                 enqueueStreamBatch(SplatBatch(FloatArray(0), FloatArray(0), FloatArray(0), 0, 0, receivedRecords, entry.records, complete = true))
@@ -1113,9 +1116,11 @@ class SplatRenderer(
     private fun consumeSplatInput(
         input: InputStream,
         expected: Int,
+        rowBytes: Int = SPLAT_ROW_BYTES,
+        format: String = SplatCache.FORMAT_SPLAT,
         onChunk: ((ByteArray, Int) -> Unit)? = null
     ): Int {
-        val batchBytes = STREAM_BATCH_RECORDS * SPLAT_ROW_BYTES
+        val batchBytes = STREAM_BATCH_RECORDS * rowBytes
         val batchBuffer = ByteArray(batchBytes)
         val readBuffer = ByteArray(STREAM_READ_BYTES)
         var batchByteCount = 0
@@ -1131,7 +1136,7 @@ class SplatRenderer(
                 batchByteCount += take
                 offset += take
                 if (batchByteCount == batchBytes) {
-                    val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + STREAM_BATCH_RECORDS, expected, complete = false)
+                    val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + STREAM_BATCH_RECORDS, expected, complete = false, rowBytes = rowBytes, format = format)
                     receivedRecords += batch.count
                     enqueueStreamBatch(batch)
                     batchByteCount = 0
@@ -1139,15 +1144,29 @@ class SplatRenderer(
             }
         }
         if (!streamCancelled.get() && batchByteCount > 0) {
-            if (batchByteCount % SPLAT_ROW_BYTES != 0) {
-                throw RuntimeException("partial trailing splat bytes: $batchByteCount")
+            if (batchByteCount % rowBytes != 0) {
+                throw RuntimeException("partial trailing splat bytes: $batchByteCount rowBytes=$rowBytes")
             }
-            val records = batchByteCount / SPLAT_ROW_BYTES
-            val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + records, expected, complete = false)
+            val records = batchByteCount / rowBytes
+            val batch = parseSplatBatch(batchBuffer, batchByteCount, receivedRecords + records, expected, complete = false, rowBytes = rowBytes, format = format)
             receivedRecords += batch.count
             enqueueStreamBatch(batch)
         }
         return receivedRecords
+    }
+
+    private fun skipFully(input: InputStream, bytes: Long) {
+        var remaining = bytes
+        while (remaining > 0L) {
+            val skipped = input.skip(remaining)
+            if (skipped > 0L) {
+                remaining -= skipped
+            } else if (input.read() >= 0) {
+                remaining--
+            } else {
+                throw RuntimeException("unexpected EOF while skipping $bytes-byte splat header")
+            }
+        }
     }
 
     private fun enqueueStreamBatch(batch: SplatBatch) {
@@ -1161,9 +1180,11 @@ class SplatRenderer(
         byteCount: Int,
         receivedCount: Int,
         expectedCount: Int,
-        complete: Boolean
+        complete: Boolean,
+        rowBytes: Int = SPLAT_ROW_BYTES,
+        format: String = SplatCache.FORMAT_SPLAT
     ): SplatBatch {
-        val count = byteCount / SPLAT_ROW_BYTES
+        val count = byteCount / rowBytes
         val centers = FloatArray(count * 3)
         val colors = FloatArray(count * 4)
         val covariances = FloatArray(count * 6)
@@ -1171,12 +1192,28 @@ class SplatRenderer(
         var invalid = 0
         var out = 0
         for (i in 0 until count) {
-            val rawX = buffer.float
-            val rawY = buffer.float
-            val rawZ = buffer.float
-            val rawSx = buffer.float
-            val rawSy = buffer.float
-            val rawSz = buffer.float
+            val compact = format == SplatCache.FORMAT_FP16_V1
+            val rawX: Float
+            val rawY: Float
+            val rawZ: Float
+            val rawSx: Float
+            val rawSy: Float
+            val rawSz: Float
+            if (compact) {
+                rawX = Half.toFloat(buffer.short)
+                rawY = Half.toFloat(buffer.short)
+                rawZ = Half.toFloat(buffer.short)
+                rawSx = Half.toFloat(buffer.short)
+                rawSy = Half.toFloat(buffer.short)
+                rawSz = Half.toFloat(buffer.short)
+            } else {
+                rawX = buffer.float
+                rawY = buffer.float
+                rawZ = buffer.float
+                rawSx = buffer.float
+                rawSy = buffer.float
+                rawSz = buffer.float
+            }
             if (!rawX.isFinite()) invalid++
             if (!rawY.isFinite()) invalid++
             if (!rawZ.isFinite()) invalid++
