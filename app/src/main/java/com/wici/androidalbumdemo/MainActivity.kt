@@ -1588,7 +1588,11 @@ class MainActivity : Activity() {
     private fun beginReframing(photo: AlbumPhoto) {
         saveAlbumScrollPosition("beginReframing")
         if (!photo.imported && photo.hasSplat) {
-            showViewer(photo)
+            if (hasCachedSplat(photo.photoId)) {
+                showViewer(photo)
+            } else {
+                beginBackendCheckedViewer(photo, "curated-stream")
+            }
             return
         }
         val localUri = photo.localUri
@@ -1606,7 +1610,34 @@ class MainActivity : Activity() {
             return
         }
         Log.i(TAG, "Ingest progressive start localPhotoId=${photo.photoId} uri=$localUri")
-        showViewer(photo.copy(hasSplat = true, imported = true, splatStreamUrl = null, splatUrl = null))
+        beginBackendCheckedViewer(photo.copy(hasSplat = true, imported = true, splatStreamUrl = null, splatUrl = null), "ingest")
+    }
+
+    private fun hasCachedSplat(photoId: String): Boolean {
+        val density = streamDensityOverride
+            ?.takeIf { it.isNotBlank() && it != "default" }
+            ?: DEFAULT_SPLAT_DENSITY
+        val cacheKey = SplatCache.keyFor(photoId, density)
+        return SplatCache.lookup(this, cacheKey, SPLAT_ROW_BYTES) != null
+    }
+
+    private fun beginBackendCheckedViewer(photo: AlbumPhoto, reason: String) {
+        val status = showReframingLoading(photo)
+        status.text = "Checking 3D server..."
+        val base = backendBaseUrl()
+        Log.i(TAG, "Backend health precheck start photoId=${photo.photoId} reason=$reason base=$base source=${backendSourceLabel()}")
+        networkExecutor.execute {
+            val health = checkOrbitHealth(base)
+            runOnUiThread {
+                if (health.ok) {
+                    Log.i(TAG, "Backend health precheck ok photoId=${photo.photoId} reason=$reason base=$base elapsedMs=${health.elapsedMs}")
+                    showViewer(photo)
+                } else {
+                    Log.w(TAG, "Backend health precheck failed photoId=${photo.photoId} reason=$reason base=$base elapsedMs=${health.elapsedMs} error=${health.message}")
+                    showBackendUnavailable(photo, base, "health", health.message)
+                }
+            }
+        }
     }
 
     private fun showReframingLoading(photo: AlbumPhoto): TextView {
@@ -1670,6 +1701,151 @@ class MainActivity : Activity() {
         return status
     }
 
+    private data class BackendHealthResult(
+        val ok: Boolean,
+        val message: String,
+        val elapsedMs: Long
+    )
+
+    private fun checkOrbitHealth(baseUrl: String): BackendHealthResult {
+        val started = SystemClock.elapsedRealtimeNanos()
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$baseUrl/orbit/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = BACKEND_HEALTH_TIMEOUT_MS
+                readTimeout = BACKEND_HEALTH_TIMEOUT_MS
+            }
+            val code = conn.responseCode
+            if (code in 200..299) {
+                BackendHealthResult(true, "HTTP $code", elapsedMs(started))
+            } else {
+                BackendHealthResult(false, "HTTP $code", elapsedMs(started))
+            }
+        } catch (exc: Exception) {
+            BackendHealthResult(false, exc.message ?: exc.javaClass.simpleName, elapsedMs(started))
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun shouldFallbackDiscoveredLocal(baseUrl: String): Boolean {
+        val discovered = discoveredBackendBaseUrl ?: return false
+        if (manualBackendBaseUrl() != null) return false
+        return normalizeBackendBaseUrl(baseUrl) == discovered && discovered != DEFAULT_BACKEND_BASE_URL
+    }
+
+    private fun switchDiscoveredLocalToCloud(reason: String) {
+        if (discoveredBackendBaseUrl == null) return
+        Log.w(TAG, "Backend local fallback to cloud reason=$reason old=$discoveredBackendBaseUrl cloud=$DEFAULT_BACKEND_BASE_URL")
+        stopBackendDiscovery()
+        discoveredBackendBaseUrl = null
+        backendDiscoveryInProgress = false
+        backendDiscoveryCompleted = true
+    }
+
+    private fun showBackendUnavailable(photo: AlbumPhoto, failedBaseUrl: String, stage: String, detail: String) {
+        val fellBackToCloud = shouldFallbackDiscoveredLocal(failedBaseUrl)
+        if (fellBackToCloud) switchDiscoveredLocalToCloud(stage)
+
+        viewerVisible = true
+        previewEnabled = false
+        glView?.shutdown()
+        glView?.onPause()
+        glView = null
+        latestCapture = null
+        difixDataUrl = null
+        fluxDataUrl = null
+        finalBitmap = null
+        currentViewerPhoto = photo
+
+        val title = TextView(this).apply {
+            text = "Can't reach the 3D server"
+            setTextColor(COLOR_INK)
+            textSize = 22f
+            typeface = spaceGrotesk(700)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        val hint = TextView(this).apply {
+            text = if (fellBackToCloud) {
+                "Local server is down. Retry will use WiCi Cloud."
+            } else {
+                "Check the server address or connection, then retry."
+            }
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 14f
+            typeface = inter(500)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setLineSpacing(dpFloat(2f), 1f)
+        }
+        val retry = TextView(this).apply {
+            text = "Retry"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            typeface = inter(700)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            minWidth = dp(132)
+            setPadding(dp(26), 0, dp(26), 0)
+            isClickable = true
+            isFocusable = true
+            background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(24).toFloat())
+            applySoftShadow(this, 4)
+            setOnClickListener { beginReframing(photo) }
+        }
+        val detailLine = TextView(this).apply {
+            text = backendAddressLabel(backendBaseUrl()).orEmpty()
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+            setSingleLine(true)
+        }
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(30), dp(30), dp(30), dp(30))
+            addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(hint, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            })
+            addView(detailLine, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            })
+            addView(retry, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)).apply {
+                topMargin = dp(22)
+            })
+        }
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_CANVAS)
+            addView(
+                studioBackButton(),
+                FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.TOP).apply {
+                    topMargin = dp(26)
+                    leftMargin = dp(18)
+                }
+            )
+            addView(
+                stack,
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                    leftMargin = dp(18)
+                    rightMargin = dp(18)
+                }
+            )
+        }
+        applyFullscreen(root)
+        setContentView(root)
+        Log.w(
+            TAG,
+            "Backend unavailable displayed photoId=${photo.photoId} stage=$stage failedBase=$failedBaseUrl " +
+                "fallbackCloud=$fellBackToCloud detail=${detail.take(180)} effective=${backendBaseUrl()}"
+        )
+    }
+
     private fun showViewer(photo: AlbumPhoto) {
         if (!photo.hasSplat) {
             if (photo.localUri != null) beginReframing(photo) else showStaticPhoto(photo)
@@ -1714,6 +1890,8 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         generateButton = primaryGenerateButton()
+        val viewerBackendBase = backendBaseUrl()
+        val viewerGalleryUrl = "$viewerBackendBase/orbit"
 
         val viewer = SplatGlView(
             this,
@@ -1721,6 +1899,13 @@ class MainActivity : Activity() {
             photo.photoId,
             { message -> runOnUiThread { renderStatus.text = message } },
             { capture -> handleReleaseCapture(capture) },
+            { error ->
+                runOnUiThread {
+                    if (viewerVisible && currentViewerPhoto?.photoId == photo.photoId) {
+                        showBackendUnavailable(photo, viewerBackendBase, "stream", error)
+                    }
+                }
+            },
             { beginLiveOrbit() },
             releaseCaptureEnabled,
             postPassEnabled,
@@ -1733,8 +1918,8 @@ class MainActivity : Activity() {
             photo.camCx,
             photo.camCy,
             photo.splatStreamUrl,
-            "${galleryUrl()}/splat_stream",
-            "${galleryUrl()}/ingest",
+            "$viewerGalleryUrl/splat_stream",
+            "$viewerGalleryUrl/ingest",
             photo.localUri?.takeIf { photo.imported }?.toString(),
             splatCacheMaxBytesOverride,
             networkStreamEnabled = !photo.imported || photo.localUri != null
@@ -3929,6 +4114,7 @@ class MainActivity : Activity() {
         private const val GOOGLE_OAUTH_CLIENT_ID = ""
         private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
         private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
+        private const val BACKEND_HEALTH_TIMEOUT_MS = 2_500
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
         private const val DISPLAY_EDGE_FEATHER_PX = 24

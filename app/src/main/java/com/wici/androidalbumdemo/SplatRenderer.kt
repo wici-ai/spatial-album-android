@@ -44,6 +44,7 @@ class SplatRenderer(
     private val photoId: String,
     private val status: (String) -> Unit,
     private val releaseCapture: (ReleaseCapture) -> Unit = {},
+    private val streamErrorCallback: (String) -> Unit = {},
     private val postPassEnabled: Boolean = true,
     streamDensity: String? = null,
     footprintScale: Float? = null,
@@ -1014,6 +1015,7 @@ class SplatRenderer(
             if (!networkStreamEnabled) {
                 streamError = "cached splat missing"
                 status("Cached splat missing for $streamId")
+                streamErrorCallback("cached splat missing")
                 Log.w(TAG, "splatCacheRequiredMiss photoId=$streamId key=$cacheKey networkStreamEnabled=false")
                 return@execute
             }
@@ -1084,6 +1086,7 @@ class SplatRenderer(
                     streamError = exc.message ?: exc.javaClass.simpleName
                     Log.e(TAG, "streamFailed photoId=$streamId", exc)
                     status("Stream failed: ${streamError}")
+                    streamErrorCallback(streamError ?: "stream failed")
                 }
             } finally {
                 if (!cacheComplete) tmpCacheFile?.delete()
@@ -1209,6 +1212,7 @@ class SplatRenderer(
                 streamError = exc.message ?: exc.javaClass.simpleName
                 Log.e(TAG, "ingestStreamFailed photoId=$streamId", exc)
                 status("Reframe failed: ${streamError}")
+                streamErrorCallback(streamError ?: "reframe failed")
             }
         } finally {
             if (!cacheComplete) tmpCacheFile?.delete()
