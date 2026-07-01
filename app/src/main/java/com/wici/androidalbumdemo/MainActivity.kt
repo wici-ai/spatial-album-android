@@ -2746,14 +2746,153 @@ class MainActivity : Activity() {
         applySoftShadow(view, if (enabled) 3 else 2)
     }
 
-    private fun showBackendSettingsDialog() {
-        val status = TextView(this).apply {
-            text = backendSettingsSummary()
-            setTextColor(COLOR_INK_SOFT)
-            textSize = 12f
-            typeface = inter(500)
-            setPadding(0, dp(8), 0, dp(10))
+    private fun serverOptionRow(mark: TextView, title: String, detail: String, badge: String?): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(15), dp(13), dp(15), dp(13))
+            isClickable = true
+            isFocusable = true
+            addView(
+                mark.apply {
+                    textSize = 12f
+                    typeface = inter(800)
+                    includeFontPadding = false
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(dp(24), dp(24)).apply {
+                    rightMargin = dp(13)
+                }
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            addView(
+                                TextView(this@MainActivity).apply {
+                                    text = title
+                                    setTextColor(COLOR_INK)
+                                    textSize = 14f
+                                    typeface = inter(700)
+                                    includeFontPadding = false
+                                },
+                                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                            )
+                            if (badge != null) {
+                                addView(
+                                    TextView(this@MainActivity).apply {
+                                        text = badge
+                                        setTextColor(COLOR_ACCENT)
+                                        textSize = 10f
+                                        typeface = inter(700)
+                                        includeFontPadding = false
+                                        setPadding(dp(8), dp(3), dp(8), dp(3))
+                                        background = rounded(0xFFEFF0FF.toInt(), dp(10).toFloat())
+                                    },
+                                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                                        leftMargin = dp(8)
+                                    }
+                                )
+                            }
+                        },
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = detail
+                            setTextColor(COLOR_INK_SOFT)
+                            textSize = 12f
+                            typeface = inter(500)
+                            setPadding(0, dp(6), 0, 0)
+                        },
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
         }
+
+    private fun styleServerOptionRow(row: View, mark: TextView, selected: Boolean) {
+        row.background = if (selected) {
+            rounded(0xFFF2F2FF.toInt(), dp(15).toFloat(), dpFloat(1.2f), COLOR_ACCENT)
+        } else {
+            rounded(COLOR_SURFACE, dp(15).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+        }
+        mark.text = if (selected) "✓" else ""
+        mark.setTextColor(if (selected) Color.WHITE else Color.TRANSPARENT)
+        mark.background = if (selected) {
+            rounded(COLOR_ACCENT, dp(12).toFloat())
+        } else {
+            rounded(COLOR_SURFACE, dp(12).toFloat(), dpFloat(1.2f), COLOR_HAIRLINE)
+        }
+    }
+
+    private fun dialogActionText(label: String, color: Int): TextView =
+        TextView(this).apply {
+            text = label
+            setTextColor(color)
+            textSize = 14f
+            typeface = inter(700)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            minWidth = dp(72)
+            setPadding(dp(12), 0, dp(12), 0)
+            isClickable = true
+            isFocusable = true
+            background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(21).toFloat())
+        }
+
+    private data class ServerStatusModel(
+        val title: String,
+        val detail: String,
+        val url: String,
+        val dotColor: Int
+    )
+
+    private fun serverStatusModel(manualMode: Boolean, url: String): ServerStatusModel =
+        when {
+            manualMode -> ServerStatusModel(
+                title = "Custom server",
+                detail = "Spatial Album will use the address you enter below.",
+                url = url,
+                dotColor = COLOR_ACCENT
+            )
+            discoveredBackendBaseUrl != null -> ServerStatusModel(
+                title = "Local server auto-discovered",
+                detail = "Using your WiCi box on this network.",
+                url = discoveredBackendBaseUrl ?: url,
+                dotColor = 0xFF34C759.toInt()
+            )
+            backendDiscoveryInProgress -> ServerStatusModel(
+                title = "Looking for a local server",
+                detail = "Using cloud while discovery runs.",
+                url = DEFAULT_BACKEND_BASE_URL,
+                dotColor = 0xFFFFB020.toInt()
+            )
+            else -> ServerStatusModel(
+                title = "Cloud server",
+                detail = "Using the hosted demo backend.",
+                url = DEFAULT_BACKEND_BASE_URL,
+                dotColor = COLOR_INK_SOFT
+            )
+        }
+
+    private fun showBackendSettingsDialog() {
+        var manualMode = manualBackendBaseUrl() != null
+        lateinit var automaticRow: LinearLayout
+        lateinit var manualRow: LinearLayout
+        lateinit var automaticMark: TextView
+        lateinit var manualMark: TextView
+        lateinit var manualFieldGroup: LinearLayout
+        lateinit var statusDot: TextView
+        lateinit var statusTitle: TextView
+        lateinit var statusDetail: TextView
+        lateinit var statusUrl: TextView
         val input = EditText(this).apply {
             setSingleLine(true)
             setText(manualBackendBaseUrl() ?: backendBaseUrl())
@@ -2764,15 +2903,35 @@ class MainActivity : Activity() {
             setTextColor(COLOR_INK)
             setHintTextColor(COLOR_INK_SOFT)
             hint = DEFAULT_BACKEND_BASE_URL
+            background = rounded(0xFFF8F9FB.toInt(), dp(12).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            setPadding(dp(14), 0, dp(14), 0)
         }
+
+        fun updateModeUi() {
+            styleServerOptionRow(automaticRow, automaticMark, selected = !manualMode)
+            styleServerOptionRow(manualRow, manualMark, selected = manualMode)
+            manualFieldGroup.visibility = if (manualMode) View.VISIBLE else View.GONE
+            input.isEnabled = manualMode
+            val effective = if (manualMode) {
+                normalizeBackendBaseUrl(input.text?.toString().orEmpty()) ?: input.text?.toString().orEmpty().trim()
+            } else {
+                discoveredBackendBaseUrl ?: DEFAULT_BACKEND_BASE_URL
+            }
+            val status = serverStatusModel(manualMode, effective)
+            statusDot.setTextColor(status.dotColor)
+            statusTitle.text = status.title
+            statusDetail.text = status.detail
+            statusUrl.text = status.url
+        }
+
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), 0)
+            setPadding(dp(24), dp(22), dp(24), dp(18))
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Backend base URL"
+                    text = "Server settings"
                     setTextColor(COLOR_INK)
-                    textSize = 18f
+                    textSize = 21f
                     typeface = inter(700)
                     includeFontPadding = false
                 },
@@ -2780,47 +2939,166 @@ class MainActivity : Activity() {
             )
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Use scheme, host, and port. Example: $DEFAULT_BACKEND_BASE_URL"
+                    text = "Choose how Spatial Album connects for reframing and generation."
                     setTextColor(COLOR_INK_SOFT)
-                    textSize = 12f
+                    textSize = 13f
                     typeface = inter(500)
-                    setPadding(0, dp(8), 0, dp(10))
+                    setPadding(0, dp(8), 0, dp(16))
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
-            addView(status, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(13), dp(16), dp(13))
+                    background = rounded(0xFFF8F9FB.toInt(), dp(16).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+                    statusDot = TextView(this@MainActivity).apply {
+                        text = "●"
+                        textSize = 18f
+                        includeFontPadding = false
+                        gravity = Gravity.CENTER
+                    }
+                    addView(statusDot, LinearLayout.LayoutParams(dp(20), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = dp(10)
+                    })
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL
+                            statusTitle = TextView(this@MainActivity).apply {
+                                setTextColor(COLOR_INK)
+                                textSize = 14f
+                                typeface = inter(700)
+                                includeFontPadding = false
+                            }
+                            statusDetail = TextView(this@MainActivity).apply {
+                                setTextColor(COLOR_INK_SOFT)
+                                textSize = 12f
+                                typeface = inter(500)
+                                setPadding(0, dp(5), 0, 0)
+                            }
+                            statusUrl = TextView(this@MainActivity).apply {
+                                setTextColor(COLOR_INK_SOFT)
+                                textSize = 11f
+                                typeface = inter(450)
+                                setPadding(0, dp(3), 0, 0)
+                                ellipsize = TextUtils.TruncateAt.MIDDLE
+                                setSingleLine(true)
+                            }
+                            addView(statusTitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                            addView(statusDetail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                            addView(statusUrl, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        },
+                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    )
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Connection"
+                    setTextColor(COLOR_INK_SOFT)
+                    textSize = 11f
+                    typeface = inter(700)
+                    letterSpacing = 0.08f
+                    setPadding(0, dp(18), 0, dp(8))
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
+            automaticMark = TextView(this@MainActivity)
+            automaticRow = serverOptionRow(
+                mark = automaticMark,
+                title = "Automatic",
+                detail = "Recommended. Finds your local WiCi server and falls back to cloud.",
+                badge = "Recommended"
+            ).apply {
+                setOnClickListener {
+                    manualMode = false
+                    updateModeUi()
+                }
+            }
+            addView(automaticRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            manualMark = TextView(this@MainActivity)
+            manualRow = serverOptionRow(
+                mark = manualMark,
+                title = "Manual",
+                detail = "Use a specific server address.",
+                badge = null
+            ).apply {
+                setOnClickListener {
+                    manualMode = true
+                    input.setText(manualBackendBaseUrl() ?: backendBaseUrl())
+                    updateModeUi()
+                }
+            }
+            addView(manualRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(10)
+            })
+            manualFieldGroup = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(12), 0, 0)
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = "Server address"
+                        setTextColor(COLOR_INK)
+                        textSize = 12f
+                        typeface = inter(650)
+                        includeFontPadding = false
+                    },
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                    topMargin = dp(8)
+                })
+            }
+            addView(manualFieldGroup, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         val dialog = AlertDialog.Builder(this)
             .setView(content)
-            .setNeutralButton("Use Auto", null)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", null)
             .create()
         dialog.setOnShowListener {
             dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(COLOR_ACCENT)
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(COLOR_INK_SOFT)
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(COLOR_INK_SOFT)
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                clearBackendBaseUrlOverride()
-                input.setText(backendBaseUrl())
-                status.text = backendSettingsSummary()
-                albumStatus?.text = "AUTO BACKEND"
-                Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
-            }
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
-                if (normalized == null) {
-                    input.error = "Use http(s)://host:port with no path"
-                    return@setOnClickListener
-                }
-                saveBackendBaseUrl(normalized)
-                albumStatus?.text = "BACKEND UPDATED"
-                Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
-                dialog.dismiss()
-            }
         }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            setPadding(dp(24), 0, dp(24), dp(18))
+            addView(
+                dialogActionText("Cancel", COLOR_INK_SOFT).apply {
+                    setOnClickListener { dialog.dismiss() }
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42))
+            )
+            addView(
+                dialogActionText("Save", COLOR_ACCENT).apply {
+                    setOnClickListener {
+                        if (manualMode) {
+                            val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
+                            if (normalized == null) {
+                                input.error = "Enter http(s)://host:port"
+                                return@setOnClickListener
+                            }
+                            saveBackendBaseUrl(normalized)
+                            albumStatus?.text = "SERVER UPDATED"
+                            Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
+                        } else {
+                            clearBackendBaseUrlOverride()
+                            albumStatus?.text = "AUTOMATIC SERVER"
+                            Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
+                        }
+                        dialog.dismiss()
+                    }
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)).apply {
+                    leftMargin = dp(18)
+                }
+            )
+        }
+        content.addView(actions, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        updateModeUi()
         dialog.show()
     }
 
