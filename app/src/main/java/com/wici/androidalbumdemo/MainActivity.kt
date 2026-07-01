@@ -16,6 +16,7 @@ import android.graphics.Canvas
 import android.graphics.ImageDecoder
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.ColorDrawable
@@ -163,7 +164,7 @@ class MainActivity : Activity() {
 
     private fun showAlbum() {
         viewerVisible = false
-        previewEnabled = false
+        previewEnabled = true
         glView?.shutdown()
         glView?.onPause()
         glView = null
@@ -203,6 +204,32 @@ class MainActivity : Activity() {
                 rightMargin = dp(12)
             }
         )
+        val controlCluster = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val previewToggle = TextView(this).apply {
+            text = "3D"
+            textSize = 13f
+            typeface = inter(800)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            contentDescription = "3D Preview"
+            setOnClickListener {
+                updateOrbitPreviews(!previewEnabled)
+                stylePreviewToggle(this, previewEnabled)
+            }
+        }
+        stylePreviewToggle(previewToggle, true)
+        albumActionButton = previewToggle
+        controlCluster.addView(
+            previewToggle,
+            LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                rightMargin = dp(8)
+            }
+        )
         val settingsButton = GearButton(this).apply {
             contentDescription = "Backend settings"
             isClickable = true
@@ -211,7 +238,8 @@ class MainActivity : Activity() {
             applySoftShadow(this, 2)
             setOnClickListener { showBackendSettingsDialog() }
         }
-        titleRow.addView(settingsButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+        controlCluster.addView(settingsButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+        titleRow.addView(controlCluster, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)))
         header.addView(titleRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val metaRow = LinearLayout(this).apply {
@@ -228,24 +256,6 @@ class MainActivity : Activity() {
         }
         metaRow.addView(albumStatus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        val previewToggle = TextView(this).apply {
-            text = "3D Preview"
-            textSize = 13f
-            typeface = inter(600)
-            includeFontPadding = false
-            gravity = Gravity.CENTER
-            minHeight = dp(38)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                updateOrbitPreviews(!previewEnabled)
-                stylePreviewToggle(this, previewEnabled)
-            }
-        }
-        stylePreviewToggle(previewToggle, false)
-        albumActionButton = previewToggle
-        metaRow.addView(previewToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
         header.addView(metaRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
@@ -299,12 +309,15 @@ class MainActivity : Activity() {
         }
         albumGrid = grid
         root.addView(grid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        adapter.previewEnabled = previewEnabled
         adapter.setPhotos(albumPhotos)
         applyFullscreen(root)
         setContentView(root)
         restoreAlbumScrollPosition(grid, "showAlbum")
         if (albumPhotos.isEmpty()) {
             loadDeviceAlbum()
+        } else {
+            grid.post { refreshVisibleOrbitPreviews() }
         }
     }
 
@@ -463,6 +476,7 @@ class MainActivity : Activity() {
                     albumAdapter?.setPhotos(albumPhotos)
                     albumStatus?.text = momentCountText()
                     albumGrid?.let { restoreAlbumScrollPosition(it, "loadDeviceAlbum") }
+                    if (previewEnabled) albumGrid?.post { refreshVisibleOrbitPreviews() }
                     Log.i(TAG, "Device photos loaded count=${parsed.size} imported=${importedPhotos.size}")
                 }
             } catch (exc: Exception) {
@@ -1059,7 +1073,7 @@ class MainActivity : Activity() {
             button.background = rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
             applySoftShadow(button, 2)
         } else {
-            button.text = "3D Preview"
+            button.text = "3D"
             button.setOnClickListener {
                 updateOrbitPreviews(!previewEnabled)
                 stylePreviewToggle(button, previewEnabled)
@@ -2711,11 +2725,11 @@ class MainActivity : Activity() {
         "${albumPhotos.size} MOMENTS"
 
     private fun stylePreviewToggle(view: TextView, enabled: Boolean) {
-        view.setTextColor(if (enabled) Color.WHITE else COLOR_INK)
+        view.setTextColor(if (enabled) Color.WHITE else COLOR_INK_SOFT)
         view.background = if (enabled) {
-            roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(19).toFloat())
+            roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(22).toFloat())
         } else {
-            rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            rounded(COLOR_SURFACE, dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
         }
         applySoftShadow(view, if (enabled) 3 else 2)
     }
@@ -3150,28 +3164,47 @@ class MainActivity : Activity() {
     private class GearButton(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = COLOR_INK_SOFT
-            style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
+        private val gearPath = Path()
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val density = resources.displayMetrics.density
             val cx = width / 2f
             val cy = height / 2f
-            paint.strokeWidth = 1.7f * density
-            val bodyRadius = 7.3f * density
-            val toothInner = 10.0f * density
-            val toothOuter = 12.2f * density
+            val outer = 13.0f * density
+            val root = 10.0f * density
+            val hole = 4.4f * density
+            gearPath.reset()
             for (i in 0 until 8) {
-                canvas.save()
-                canvas.rotate(i * 45f, cx, cy)
-                canvas.drawLine(cx, cy - toothInner, cx, cy - toothOuter, paint)
-                canvas.restore()
+                val base = Math.toRadians((i * 45f - 22.5f).toDouble())
+                val points = doubleArrayOf(
+                    base,
+                    base + Math.toRadians(9.5),
+                    base + Math.toRadians(35.5),
+                    base + Math.toRadians(45.0)
+                )
+                for ((j, angle) in points.withIndex()) {
+                    val radius = if (j == 1 || j == 2) outer else root
+                    val x = cx + (Math.cos(angle) * radius).toFloat()
+                    val y = cy + (Math.sin(angle) * radius).toFloat()
+                    if (i == 0 && j == 0) gearPath.moveTo(x, y) else gearPath.lineTo(x, y)
+                }
             }
-            canvas.drawCircle(cx, cy, bodyRadius, paint)
-            canvas.drawCircle(cx, cy, 2.8f * density, paint)
+            gearPath.close()
+            paint.style = Paint.Style.FILL
+            paint.color = COLOR_INK_SOFT
+            canvas.drawPath(gearPath, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = COLOR_SURFACE
+            canvas.drawCircle(cx, cy, hole, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.4f * density
+            paint.color = COLOR_INK_SOFT
+            canvas.drawPath(gearPath, paint)
+            canvas.drawCircle(cx, cy, hole, paint)
         }
     }
 
