@@ -101,6 +101,7 @@ class MainActivity : Activity() {
     private val importedPhotos = mutableListOf<AlbumPhoto>()
     private val removedCuratedPhotoIds = mutableSetOf<String>()
     private val localSourceDataUrlCache = mutableMapOf<String, String>()
+    private val localSourceJpegCache = mutableMapOf<String, ByteArray>()
     private var albumScrollState: AlbumScrollState? = null
     private var albumScrollParcelable: Parcelable? = null
     private var nextImportedOrdinal = 1
@@ -1869,20 +1870,44 @@ class MainActivity : Activity() {
         difixBusy = true
         networkExecutor.execute {
             try {
-                val started = System.nanoTime()
-                val response = postJson("$DIFIX_URL/refine", buildDifixBody(capture), 240_000)
-                val refined = response.getString("refinedPng")
-                val bitmap = decodeDataUrl(refined)
+                val flowStartNs = SystemClock.elapsedRealtimeNanos()
+                val bodyStartNs = SystemClock.elapsedRealtimeNanos()
+                val body = buildDifixMultipartBody(capture)
+                val bodyBuildMs = elapsedMs(bodyStartNs)
+                val postResult = postDifixMultipart("$DIFIX_URL/refine", body, 240_000)
+                val processStartNs = SystemClock.elapsedRealtimeNanos()
+                val decodeStartNs = SystemClock.elapsedRealtimeNanos()
+                val bitmap = BitmapFactory.decodeByteArray(postResult.imageBytes, 0, postResult.imageBytes.size)
+                    ?: throw IllegalArgumentException("failed to decode Difix image")
+                val responseDecodeMs = elapsedMs(decodeStartNs)
+                val compositeStartNs = SystemClock.elapsedRealtimeNanos()
                 val displayBitmap = displayCompositeBitmap(capture, bitmap)
-                difixDataUrl = refined
+                val displayCompositeMs = elapsedMs(compositeStartNs)
+                difixDataUrl = "data:${postResult.contentType};base64,${Base64.encodeToString(postResult.imageBytes, Base64.NO_WRAP)}"
                 finalBitmap = bitmap
                 displayMode = DisplayMode.DIFIX
-                val elapsed = (System.nanoTime() - started) / 1_000_000
+                val processBeforeUiMs = elapsedMs(processStartNs)
                 runOnUiThread {
+                    val uiStartNs = SystemClock.elapsedRealtimeNanos()
                     overlay.setImageBitmap(displayBitmap)
                     overlay.visibility = View.VISIBLE
                     updateViewerControls()
-                    setPipelineStatus("Difix done in ${elapsed}ms (${capture.width}x${capture.height})")
+                    val uiDisplayMs = elapsedMs(uiStartNs)
+                    val totalToDisplayedMs = elapsedMs(flowStartNs)
+                    Log.i(
+                        TAG,
+                        "Difix binary profile capture=${capture.width}x${capture.height} " +
+                            "bodyBuildMs=$bodyBuildMs connectMs=${postResult.connectMs} " +
+                            "uploadMs=${postResult.uploadMs} serverWaitFirstByteMs=${postResult.serverWaitFirstByteMs} " +
+                            "serverWaitHeadersMs=${postResult.serverWaitHeadersMs} " +
+                            "responseDownloadMs=${postResult.responseDownloadMs} " +
+                            "responseDecodeMs=$responseDecodeMs displayCompositeMs=$displayCompositeMs " +
+                            "processBeforeUiMs=$processBeforeUiMs uiDisplayMs=$uiDisplayMs " +
+                            "totalToDisplayedMs=$totalToDisplayedMs requestBytes=${body.bytes.size} " +
+                            "responseBytes=${postResult.imageBytes.size} httpStatus=${postResult.httpStatus} " +
+                            "serverTiming=${postResult.serverTimingJson?.take(220) ?: "-"}"
+                    )
+                    setPipelineStatus("Difix done in ${totalToDisplayedMs}ms (${capture.width}x${capture.height})")
                 }
             } catch (exc: Exception) {
                 runOnUiThread { setPipelineStatus("Difix failed: ${exc.message}") }
@@ -1901,56 +1926,61 @@ class MainActivity : Activity() {
         setPipelineStatus("Showing raw splat")
     }
 
-    private fun buildDifixBody(capture: ReleaseCapture): JSONObject {
+    private fun buildDifixMultipartBody(capture: ReleaseCapture): DifixMultipartBody {
         val photo = currentViewerPhoto
         val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
         val metrics = captureMetrics(capture)
-        val seedStats = dataUrlStats(capture.seedDataUrl)
-        val previewStats = dataUrlStats(capture.previewDataUrl)
-        val maskStats = dataUrlStats(capture.refineMaskDataUrl)
-        val body = JSONObject()
-            .put("ply", capture.assetName)
-            .put("box", "android-album-demo")
-            .put("photoId", photoId)
-            .put("prompt", "remove degradation")
-            .put("seedPng", capture.seedDataUrl)
-            .put("previewPng", capture.previewDataUrl)
-            .put("refineMaskPng", capture.refineMaskDataUrl)
-            .put("metrics", metrics)
-        var sourceStats: DataUrlStats? = null
+        val seed = dataUrlPart(capture.seedDataUrl)
+        val preview = dataUrlPart(capture.previewDataUrl)
+        val mask = dataUrlPart(capture.refineMaskDataUrl)
+        val boundary = "----WiciAndroidDifix${SystemClock.elapsedRealtimeNanos()}"
+        val out = ByteArrayOutputStream()
+        writeMultipartText(out, boundary, "ply", capture.assetName)
+        writeMultipartText(out, boundary, "box", "android-album-demo")
+        writeMultipartText(out, boundary, "photoId", photoId)
+        writeMultipartText(out, boundary, "prompt", "remove degradation")
+        writeMultipartText(out, boundary, "metrics", metrics.toString())
+        writeMultipartBytes(out, boundary, "seed", "seed.jpg", seed.mime, seed.bytes)
+        writeMultipartBytes(out, boundary, "preview", "preview.jpg", preview.mime, preview.bytes)
+        writeMultipartBytes(out, boundary, "refineMask", "refine-mask.png", mask.mime, mask.bytes)
+        var sourceBytes = 0
+        var sourceMime = ""
         if (photo?.imported == true && photo.localUri != null) {
-            body.put("sourceId", photoId)
-            val sourceDataUrl = localSourceDataUrl(photo)
-            sourceStats = dataUrlStats(sourceDataUrl)
-            body.put("source", sourceDataUrl)
-            metrics.put("transportMode", "android-local-source-data-url+jpeg")
+            val source = localSourceJpegBytes(photo)
+            sourceBytes = source.size
+            sourceMime = "image/jpeg"
+            writeMultipartText(out, boundary, "sourceId", photoId)
+            writeMultipartBytes(out, boundary, "source", "source.jpg", sourceMime, source)
+            metrics.put("transportMode", "android-local-source-multipart+jpeg")
         } else {
-            body.put("sourceId", "$photoId-original")
-            sourcePathForAsset(capture.assetName)?.let { body.put("source", it) }
+            writeMultipartText(out, boundary, "sourceId", "$photoId-original")
+            sourcePathForAsset(capture.assetName)?.let { writeMultipartText(out, boundary, "source", it) }
         }
-        val bodyChars = body.toString().length
+        out.writeUtf8("--$boundary--\r\n")
+        val requestBytes = out.size()
         metrics.put(
             "difixTransport",
             JSONObject()
-                .put("seedBytes", seedStats.bytes)
-                .put("seedMime", seedStats.mime)
-                .put("previewBytes", previewStats.bytes)
-                .put("previewMime", previewStats.mime)
-                .put("refineMaskBytes", maskStats.bytes)
-                .put("refineMaskMime", maskStats.mime)
-                .put("sourceBytes", sourceStats?.bytes ?: 0)
-                .put("sourceMime", sourceStats?.mime ?: "")
-                .put("bodyChars", bodyChars)
-                .put("seedPreviewSame", dataUrlPayload(capture.seedDataUrl) == dataUrlPayload(capture.previewDataUrl))
+                .put("mode", "multipart-binary")
+                .put("seedBytes", seed.bytes.size)
+                .put("seedMime", seed.mime)
+                .put("previewBytes", preview.bytes.size)
+                .put("previewMime", preview.mime)
+                .put("refineMaskBytes", mask.bytes.size)
+                .put("refineMaskMime", mask.mime)
+                .put("sourceBytes", sourceBytes)
+                .put("sourceMime", sourceMime)
+                .put("requestBytes", requestBytes)
+                .put("seedPreviewSame", seed.bytes.contentEquals(preview.bytes))
         )
         Log.i(
             TAG,
-            "Difix request payload photoId=$photoId capture=${capture.width}x${capture.height} " +
-                "seed=${seedStats.bytes}B/${seedStats.mime} preview=${previewStats.bytes}B/${previewStats.mime} " +
-                "mask=${maskStats.bytes}B/${maskStats.mime} source=${sourceStats?.bytes ?: 0}B/${sourceStats?.mime ?: "-"} " +
-                "bodyChars=$bodyChars seedPreviewSame=${dataUrlPayload(capture.seedDataUrl) == dataUrlPayload(capture.previewDataUrl)}"
+            "Difix binary request payload photoId=$photoId capture=${capture.width}x${capture.height} " +
+                "seed=${seed.bytes.size}B/${seed.mime} preview=${preview.bytes.size}B/${preview.mime} " +
+                "mask=${mask.bytes.size}B/${mask.mime} source=${sourceBytes}B/${sourceMime.ifBlank { "-" }} " +
+                "requestBytes=$requestBytes seedPreviewSame=${seed.bytes.contentEquals(preview.bytes)}"
         )
-        return body
+        return DifixMultipartBody(boundary, out.toByteArray())
     }
 
     private fun captureMetrics(capture: ReleaseCapture): JSONObject =
@@ -2184,6 +2214,85 @@ class MainActivity : Activity() {
         return JSONObject(text)
     }
 
+    private fun postDifixMultipart(url: String, body: DifixMultipartBody, timeoutMs: Int): DifixBinaryResult {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = timeoutMs
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=${body.boundary}")
+            setRequestProperty("Accept", "image/jpeg")
+            setRequestProperty("Content-Length", body.bytes.size.toString())
+        }
+        val connectStartNs = SystemClock.elapsedRealtimeNanos()
+        conn.connect()
+        val connectMs = elapsedMs(connectStartNs)
+        val uploadStartNs = SystemClock.elapsedRealtimeNanos()
+        conn.outputStream.use { it.write(body.bytes) }
+        val uploadMs = elapsedMs(uploadStartNs)
+        val waitStartNs = SystemClock.elapsedRealtimeNanos()
+        val code = conn.responseCode
+        val serverWaitHeadersMs = elapsedMs(waitStartNs)
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val responseBytes = ByteArrayOutputStream()
+        var serverWaitFirstByteMs = serverWaitHeadersMs
+        var responseDownloadMs = 0L
+        stream?.use { input ->
+            val buffer = ByteArray(64 * 1024)
+            val firstCount = input.read(buffer)
+            serverWaitFirstByteMs = elapsedMs(waitStartNs)
+            val downloadStartNs = SystemClock.elapsedRealtimeNanos()
+            if (firstCount > 0) responseBytes.write(buffer, 0, firstCount)
+            if (firstCount >= 0) {
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count > 0) responseBytes.write(buffer, 0, count)
+                }
+            }
+            responseDownloadMs = elapsedMs(downloadStartNs)
+        }
+        if (code !in 200..299) {
+            val text = responseBytes.toString(StandardCharsets.UTF_8.name())
+            throw RuntimeException("HTTP $code: ${text.take(220)}")
+        }
+        Log.i(
+            TAG,
+            "Difix binary HTTP profile requestBytes=${body.bytes.size} responseBytes=${responseBytes.size()} " +
+                "connectMs=$connectMs uploadMs=$uploadMs serverWaitHeadersMs=$serverWaitHeadersMs " +
+                "serverWaitFirstByteMs=$serverWaitFirstByteMs responseDownloadMs=$responseDownloadMs status=$code " +
+                "serverTiming=${conn.headerString("X-Difix-Timing-Json")?.take(220) ?: "-"}"
+        )
+        return DifixBinaryResult(
+            imageBytes = responseBytes.toByteArray(),
+            contentType = conn.contentType?.substringBefore(";")?.ifBlank { null } ?: "image/jpeg",
+            connectMs = connectMs,
+            uploadMs = uploadMs,
+            serverWaitHeadersMs = serverWaitHeadersMs,
+            serverWaitFirstByteMs = serverWaitFirstByteMs,
+            responseDownloadMs = responseDownloadMs,
+            httpStatus = code,
+            serverTimingJson = conn.headerString("X-Difix-Timing-Json")
+        )
+    }
+
+    private data class DifixMultipartBody(
+        val boundary: String,
+        val bytes: ByteArray
+    )
+
+    private data class DifixBinaryResult(
+        val imageBytes: ByteArray,
+        val contentType: String,
+        val connectMs: Long,
+        val uploadMs: Long,
+        val serverWaitHeadersMs: Long,
+        val serverWaitFirstByteMs: Long,
+        val responseDownloadMs: Long,
+        val httpStatus: Int,
+        val serverTimingJson: String?
+    )
+
     private data class IngestSplatResult(
         val photo: AlbumPhoto,
         val store: SplatCache.StoreResult,
@@ -2371,6 +2480,21 @@ class MainActivity : Activity() {
         out.writeUtf8("\r\n")
     }
 
+    private fun writeMultipartBytes(
+        out: OutputStream,
+        boundary: String,
+        name: String,
+        filename: String,
+        mime: String,
+        bytes: ByteArray
+    ) {
+        out.writeUtf8("--$boundary\r\n")
+        out.writeUtf8("Content-Disposition: form-data; name=\"$name\"; filename=\"$filename\"\r\n")
+        out.writeUtf8("Content-Type: $mime\r\n\r\n")
+        out.write(bytes)
+        out.writeUtf8("\r\n")
+    }
+
     private fun OutputStream.writeUtf8(value: String) {
         write(value.toByteArray(StandardCharsets.UTF_8))
     }
@@ -2486,9 +2610,17 @@ class MainActivity : Activity() {
     }
 
     private data class DataUrlStats(val mime: String, val bytes: Int)
+    private data class DataUrlPart(val mime: String, val bytes: ByteArray)
 
     private fun dataUrlPayload(value: String): String =
         value.substringAfter(",", value)
+
+    private fun dataUrlPart(value: String): DataUrlPart {
+        val header = value.substringBefore(",", "")
+        val mime = header.removePrefix("data:").substringBefore(";").ifBlank { "application/octet-stream" }
+        val bytes = Base64.decode(dataUrlPayload(value), Base64.DEFAULT)
+        return DataUrlPart(mime, bytes)
+    }
 
     private fun dataUrlStats(value: String): DataUrlStats {
         val header = value.substringBefore(",", "")
@@ -2501,22 +2633,33 @@ class MainActivity : Activity() {
         synchronized(localSourceDataUrlCache) {
             localSourceDataUrlCache[photo.photoId]?.let { return it }
         }
+        val bytes = localSourceJpegBytes(photo)
+        val dataUrl = "data:image/jpeg;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+        synchronized(localSourceDataUrlCache) {
+            localSourceDataUrlCache[photo.photoId] = dataUrl
+        }
+        return dataUrl
+    }
+
+    private fun localSourceJpegBytes(photo: AlbumPhoto): ByteArray {
+        synchronized(localSourceJpegCache) {
+            localSourceJpegCache[photo.photoId]?.let { return it }
+        }
         val uri = photo.localUri ?: throw IllegalArgumentException("imported photo has no local URI")
         val bitmap = decodeLocalBitmap(uri, DIFIX_SOURCE_UPLOAD_MAX_SIDE)
         val out = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, DIFIX_SOURCE_UPLOAD_JPEG_QUALITY, out)
         val bytes = out.toByteArray()
         bitmap.recycle()
-        val dataUrl = "data:image/jpeg;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
-        synchronized(localSourceDataUrlCache) {
-            localSourceDataUrlCache[photo.photoId] = dataUrl
+        synchronized(localSourceJpegCache) {
+            localSourceJpegCache[photo.photoId] = bytes
         }
         Log.i(
             TAG,
-            "Local source encoded photoId=${photo.photoId} bytes=${bytes.size} chars=${dataUrl.length} " +
+            "Local source encoded photoId=${photo.photoId} bytes=${bytes.size} " +
                 "maxSide=$DIFIX_SOURCE_UPLOAD_MAX_SIDE quality=$DIFIX_SOURCE_UPLOAD_JPEG_QUALITY"
         )
-        return dataUrl
+        return bytes
     }
 
     private fun loadRemovedCuratedPhotoIds(): Set<String> =
