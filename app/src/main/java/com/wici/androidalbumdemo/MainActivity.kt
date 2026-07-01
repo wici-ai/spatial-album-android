@@ -4,7 +4,7 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.res.ColorStateList
 import android.content.ContentValues
 import android.content.Context
@@ -42,6 +42,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
@@ -51,6 +53,7 @@ import android.widget.ImageView
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
@@ -2743,73 +2746,58 @@ class MainActivity : Activity() {
         applySoftShadow(view, if (enabled) 3 else 2)
     }
 
-    private fun serverRadioRow(mark: TextView, title: String, detail: String): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.TOP
-            setPadding(0, dp(10), 0, dp(10))
-            isClickable = true
-            isFocusable = true
-            background = roundedState(Color.TRANSPARENT, 0x08000000, dp(8).toFloat())
-            addView(
-                mark.apply {
-                    textSize = 16f
-                    typeface = inter(650)
-                    includeFontPadding = false
-                    gravity = Gravity.CENTER
-                },
-                LinearLayout.LayoutParams(dp(24), dp(24)).apply {
-                    rightMargin = dp(10)
-                }
-            )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = title
-                            setTextColor(COLOR_INK)
-                            textSize = 15f
-                            typeface = inter(650)
-                            includeFontPadding = false
-                        },
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = detail
-                            setTextColor(COLOR_INK_SOFT)
-                            textSize = 12f
-                            typeface = inter(500)
-                            setPadding(0, dp(5), 0, 0)
-                        },
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                },
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
-        }
-
-    private fun styleServerRadio(mark: TextView, selected: Boolean) {
-        mark.text = if (selected) "●" else "○"
-        mark.setTextColor(if (selected) COLOR_ACCENT else COLOR_INK_SOFT)
-    }
-
-    private fun dialogActionText(label: String, color: Int): TextView =
+    private fun serverSegmentButton(label: String): TextView =
         TextView(this).apply {
             text = label
-            setTextColor(color)
             textSize = 14f
-            typeface = inter(700)
+            typeface = inter(600)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(8), 0)
+            isClickable = true
+            isFocusable = true
+        }
+
+    private fun styleServerSegment(segment: TextView, selected: Boolean) {
+        segment.setTextColor(if (selected) COLOR_INK else COLOR_INK_SOFT)
+        segment.typeface = inter(if (selected) 650 else 500)
+        segment.background = if (selected) {
+            rounded(COLOR_SURFACE, dp(10).toFloat())
+        } else {
+            null
+        }
+        applySoftShadow(segment, if (selected) 2 else 0)
+    }
+
+    private fun sheetCancelAction(label: String): TextView =
+        TextView(this).apply {
+            text = label
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 15f
+            typeface = inter(600)
             includeFontPadding = false
             gravity = Gravity.CENTER
             minWidth = dp(72)
             setPadding(dp(12), 0, dp(12), 0)
             isClickable = true
             isFocusable = true
-            background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(21).toFloat())
+            background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(20).toFloat())
+        }
+
+    private fun sheetSaveAction(label: String): TextView =
+        TextView(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            typeface = inter(650)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            minWidth = dp(92)
+            setPadding(dp(22), 0, dp(22), 0)
+            isClickable = true
+            isFocusable = true
+            background = roundedState(COLOR_ACCENT, COLOR_ACCENT_PRESS, dp(20).toFloat())
+            applySoftShadow(this, 3)
         }
 
     private data class ServerStatusModel(
@@ -2875,16 +2863,13 @@ class MainActivity : Activity() {
 
     private fun showBackendSettingsDialog() {
         var manualMode = manualBackendBaseUrl() != null
-        lateinit var automaticRow: LinearLayout
-        lateinit var manualRow: LinearLayout
-        lateinit var automaticMark: TextView
-        lateinit var manualMark: TextView
-        lateinit var manualFieldGroup: LinearLayout
-        lateinit var statusLine: TextView
-        lateinit var statusAddress: TextView
+        lateinit var automaticSegment: TextView
+        lateinit var manualSegment: TextView
+        lateinit var contextZone: LinearLayout
         lateinit var accountTitle: TextView
         lateinit var accountDetail: TextView
         lateinit var signOutAction: TextView
+        val quietGreen = 0xFF2FB574.toInt()
         val input = EditText(this).apply {
             setSingleLine(true)
             setText(manualBackendBaseUrl() ?: backendBaseUrl())
@@ -2900,13 +2885,77 @@ class MainActivity : Activity() {
         }
 
         fun updateModeUi() {
-            styleServerRadio(automaticMark, selected = !manualMode)
-            styleServerRadio(manualMark, selected = manualMode)
-            manualFieldGroup.visibility = if (manualMode) View.VISIBLE else View.GONE
+            styleServerSegment(automaticSegment, selected = !manualMode)
+            styleServerSegment(manualSegment, selected = manualMode)
             input.isEnabled = manualMode
-            val status = serverStatusModel(manualMode, input.text?.toString().orEmpty())
-            statusLine.text = status.statusLine
-            statusAddress.text = status.addressLine
+            contextZone.removeAllViews()
+            if (manualMode) {
+                contextZone.addView(
+                    TextView(this@MainActivity).apply {
+                        text = "Server address"
+                        setTextColor(COLOR_INK)
+                        textSize = 13f
+                        typeface = inter(600)
+                        includeFontPadding = false
+                    },
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                contextZone.addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                    topMargin = dp(8)
+                })
+            } else {
+                val status = serverStatusModel(false, "")
+                val dotColor = if (discoveredBackendBaseUrl != null) quietGreen else COLOR_ACCENT
+                contextZone.addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.TOP
+                        addView(
+                            View(this@MainActivity).apply {
+                                background = rounded(dotColor, dp(4).toFloat())
+                            },
+                            LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                                topMargin = dp(5)
+                                rightMargin = dp(10)
+                            }
+                        )
+                        addView(
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                addView(
+                                    TextView(this@MainActivity).apply {
+                                        text = status.statusLine
+                                        setTextColor(COLOR_INK)
+                                        textSize = 14f
+                                        typeface = inter(500)
+                                        includeFontPadding = false
+                                    },
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    LinearLayout.LayoutParams.WRAP_CONTENT
+                                )
+                                addView(
+                                    TextView(this@MainActivity).apply {
+                                        text = status.addressLine
+                                        setTextColor(COLOR_INK_SOFT)
+                                        textSize = 12f
+                                        typeface = Typeface.MONOSPACE
+                                        includeFontPadding = false
+                                        ellipsize = TextUtils.TruncateAt.MIDDLE
+                                        setSingleLine(true)
+                                        setPadding(0, dp(5), 0, 0)
+                                    },
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    LinearLayout.LayoutParams.WRAP_CONTENT
+                                )
+                            },
+                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        )
+                    },
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
         }
 
         fun updateAccountUi() {
@@ -2922,128 +2971,80 @@ class MainActivity : Activity() {
             }
         }
 
-        val content = LinearLayout(this).apply {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(14))
+            setPadding(dp(24), dp(12), dp(24), dp(20))
+            background = roundedTop(COLOR_SURFACE, dp(22).toFloat())
+            applySoftShadow(this, 6)
+            addView(
+                View(this@MainActivity).apply {
+                    background = rounded(Color.argb(51, 107, 110, 118), dp(2).toFloat())
+                },
+                LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    bottomMargin = dp(14)
+                }
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Server"
+                    setTextColor(COLOR_INK)
+                    textSize = 24f
+                    typeface = spaceGrotesk(700)
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
             addView(
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = "Server"
-                            setTextColor(COLOR_INK)
-                            textSize = 22f
-                            typeface = inter(700)
-                            includeFontPadding = false
-                        },
-                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    )
-                    addView(
-                        TextView(this@MainActivity).apply {
-                            text = "✕"
-                            setTextColor(COLOR_INK_SOFT)
-                            textSize = 18f
-                            typeface = inter(650)
-                            gravity = Gravity.CENTER
-                            includeFontPadding = false
-                            isClickable = true
-                            isFocusable = true
-                            background = roundedState(Color.TRANSPARENT, 0x0F000000, dp(18).toFloat())
-                        },
-                        LinearLayout.LayoutParams(dp(36), dp(36))
-                    )
-                },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(0, dp(10), 0, dp(4))
-                    statusLine = TextView(this@MainActivity).apply {
-                        setTextColor(COLOR_INK_SOFT)
-                        textSize = 13f
-                        typeface = inter(550)
-                        includeFontPadding = false
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
+                    background = rounded(COLOR_CANVAS, dp(13).toFloat())
+                    automaticSegment = serverSegmentButton("Automatic").apply {
+                        setOnClickListener {
+                            manualMode = false
+                            updateModeUi()
+                        }
                     }
-                    statusAddress = TextView(this@MainActivity).apply {
-                        setTextColor(COLOR_INK_SOFT)
-                        textSize = 12f
-                        typeface = inter(450)
-                        includeFontPadding = false
-                        ellipsize = TextUtils.TruncateAt.MIDDLE
-                        setSingleLine(true)
-                        setPadding(0, dp(4), 0, 0)
+                    manualSegment = serverSegmentButton("Manual").apply {
+                        setOnClickListener {
+                            manualMode = true
+                            input.setText(manualBackendBaseUrl() ?: backendBaseUrl())
+                            updateModeUi()
+                        }
                     }
-                    addView(statusLine, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    addView(statusAddress, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    addView(automaticSegment, LinearLayout.LayoutParams(0, dp(38), 1f))
+                    addView(manualSegment, LinearLayout.LayoutParams(0, dp(38), 1f))
                 },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                    topMargin = dp(16)
+                }
             )
-            automaticMark = TextView(this@MainActivity)
-            automaticRow = serverRadioRow(
-                mark = automaticMark,
-                title = "Automatic",
-                detail = "Local box, falls back to cloud"
-            ).apply {
-                setOnClickListener {
-                    manualMode = false
-                    updateModeUi()
-                }
-            }
-            addView(automaticRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(6)
-            })
-
-            manualMark = TextView(this@MainActivity)
-            manualRow = serverRadioRow(
-                mark = manualMark,
-                title = "Manual",
-                detail = "Enter a server address"
-            ).apply {
-                setOnClickListener {
-                    manualMode = true
-                    input.setText(manualBackendBaseUrl() ?: backendBaseUrl())
-                    updateModeUi()
-                }
-            }
-            addView(manualRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            manualFieldGroup = LinearLayout(this@MainActivity).apply {
+            contextZone = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(34), dp(3), 0, 0)
-                addView(
-                    TextView(this@MainActivity).apply {
-                        text = "Server address"
-                        setTextColor(COLOR_INK)
-                        textSize = 12f
-                        typeface = inter(650)
-                        includeFontPadding = false
-                    },
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-                addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply {
-                    topMargin = dp(6)
-                })
             }
-            addView(manualFieldGroup, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(contextZone, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(16)
+            })
             addView(
                 View(this@MainActivity).apply {
-                    setBackgroundColor(0x80E2E4E8.toInt())
+                    setBackgroundColor(COLOR_HAIRLINE)
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-                    topMargin = dp(10)
-                    bottomMargin = dp(12)
+                    topMargin = dp(20)
+                    bottomMargin = dp(18)
                 }
             )
             addView(
                 TextView(this@MainActivity).apply {
                     text = "Account"
-                    setTextColor(COLOR_INK)
-                    textSize = 14f
-                    typeface = inter(650)
+                    setTextColor(COLOR_INK_SOFT)
+                    textSize = 12f
+                    typeface = inter(600)
                     includeFontPadding = false
-                    setPadding(0, 0, 0, dp(8))
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
@@ -3051,7 +3052,7 @@ class MainActivity : Activity() {
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(3), 0, dp(5))
+                    setPadding(0, dp(11), 0, dp(10))
                     isClickable = true
                     isFocusable = true
                     background = roundedState(Color.TRANSPARENT, 0x08000000, dp(8).toFloat())
@@ -3071,8 +3072,8 @@ class MainActivity : Activity() {
                             orientation = LinearLayout.VERTICAL
                             accountTitle = TextView(this@MainActivity).apply {
                                 setTextColor(COLOR_INK)
-                                textSize = 14f
-                                typeface = inter(650)
+                                textSize = 15f
+                                typeface = inter(600)
                                 includeFontPadding = false
                                 maxLines = 1
                                 ellipsize = TextUtils.TruncateAt.END
@@ -3080,7 +3081,7 @@ class MainActivity : Activity() {
                             accountDetail = TextView(this@MainActivity).apply {
                                 setTextColor(COLOR_INK_SOFT)
                                 textSize = 12f
-                                typeface = inter(500)
+                                typeface = inter(400)
                                 includeFontPadding = false
                                 setPadding(0, dp(3), 0, 0)
                             }
@@ -3114,48 +3115,60 @@ class MainActivity : Activity() {
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setView(content)
-            .create()
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            setPadding(0, dp(10), 0, 0)
             addView(
-                dialogActionText("Cancel", COLOR_INK_SOFT).apply {
-                    setOnClickListener { dialog.dismiss() }
-                },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42))
-            )
-            addView(
-                dialogActionText("Save", COLOR_ACCENT).apply {
-                    setOnClickListener {
-                        if (manualMode) {
-                            val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
-                            if (normalized == null) {
-                                input.error = "Enter http(s)://host:port"
-                                return@setOnClickListener
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                    addView(
+                        sheetCancelAction("Cancel").apply {
+                            setOnClickListener { dialog.dismiss() }
+                        },
+                        LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40))
+                    )
+                    addView(
+                        sheetSaveAction("Save").apply {
+                            setOnClickListener {
+                                if (manualMode) {
+                                    val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
+                                    if (normalized == null) {
+                                        input.error = "Enter http(s)://host:port"
+                                        return@setOnClickListener
+                                    }
+                                    saveBackendBaseUrl(normalized)
+                                    Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
+                                } else {
+                                    clearBackendBaseUrlOverride()
+                                    Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
+                                }
+                                dialog.dismiss()
                             }
-                            saveBackendBaseUrl(normalized)
-                            Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
-                        } else {
-                            clearBackendBaseUrlOverride()
-                            Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
+                        },
+                        LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+                            leftMargin = dp(12)
                         }
-                        dialog.dismiss()
-                    }
+                    )
                 },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)).apply {
-                    leftMargin = dp(18)
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(16)
                 }
             )
         }
-        content.addView(actions, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(sheet, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+        dialog.setContentView(scroll)
         dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
-            val close = (content.getChildAt(0) as? LinearLayout)?.getChildAt(1)
-            close?.setOnClickListener { dialog.dismiss() }
+            dialog.window?.let { window ->
+                window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                window.setDimAmount(0.36f)
+                window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                window.setGravity(Gravity.BOTTOM)
+                window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            }
         }
         updateModeUi()
         updateAccountUi()
@@ -3561,6 +3574,12 @@ class MainActivity : Activity() {
             if (strokeWidth > 0f) {
                 setStroke(strokeWidth.roundToInt().coerceAtLeast(1), strokeColor)
             }
+        }
+
+    private fun roundedTop(color: Int, radius: Float): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
         }
 
     private fun roundedState(
