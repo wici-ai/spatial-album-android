@@ -82,7 +82,6 @@ class MainActivity : Activity() {
     private val previewBakeInFlight = ConcurrentHashMap.newKeySet<String>()
     private var assetName: String = "brush-clean-noshr-10k.ply"
     private var latestCapture: ReleaseCapture? = null
-    private var difixDataUrl: String? = null
     private var fluxDataUrl: String? = null
     private var finalBitmap: Bitmap? = null
     private var currentViewerPhoto: AlbumPhoto? = null
@@ -1474,7 +1473,6 @@ class MainActivity : Activity() {
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         previewRequestSerial++
@@ -1663,7 +1661,6 @@ class MainActivity : Activity() {
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         previewRequestSerial++
@@ -1792,7 +1789,6 @@ class MainActivity : Activity() {
         glView?.onPause()
         glView = null
         latestCapture = null
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         currentViewerPhoto = photo
@@ -1949,8 +1945,8 @@ class MainActivity : Activity() {
             applySoftShadow(this, 0)
             setOnClickListener {
                 clearGenerateErrorOverlay()
-                if (difixDataUrl != null && latestCapture != null) {
-                    displayMode = DisplayMode.DIFIX
+                if (latestCapture != null) {
+                    displayMode = DisplayMode.RAW
                     updateViewerControls()
                     generateFlux()
                 } else {
@@ -2019,7 +2015,6 @@ class MainActivity : Activity() {
         assetName = photo.splatAsset
         currentViewerPhoto = photo
         latestCapture = null
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         displayMode = DisplayMode.RAW
@@ -2147,7 +2142,6 @@ class MainActivity : Activity() {
         viewerRoot = null
         generateErrorOverlay = null
         latestCapture = null
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         previewRequestSerial++
@@ -2244,85 +2238,15 @@ class MainActivity : Activity() {
     }
 
     private fun handleReleaseCapture(capture: ReleaseCapture) {
-        if (difixBusy) return
+        if (difixBusy || fluxBusy) return
         latestCapture = capture
-        difixDataUrl = null
         fluxDataUrl = null
         finalBitmap = null
         displayMode = DisplayMode.RAW
         runOnUiThread {
             overlay.visibility = View.GONE
             updateViewerControls()
-            setPipelineStatus("Captured ${capture.width}x${capture.height}; running Difix...")
-        }
-        difixBusy = true
-        val generateBackendBase = backendBaseUrl()
-        if (requiresCloudLogin(generateBackendBase) && !SupabaseAuth.isLoggedIn()) {
-            difixBusy = false
-            runOnUiThread {
-                setPipelineStatus("Sign in to use WiCi Cloud Generate")
-                updateViewerControls()
-                promptCloudLogin("Generate", onFailed = {
-                    setPipelineStatus("Sign in with Google to use WiCi Cloud Generate")
-                }) {
-                    handleReleaseCapture(capture)
-                }
-            }
-            return
-        }
-        networkExecutor.execute {
-            try {
-                val flowStartNs = SystemClock.elapsedRealtimeNanos()
-                val bodyStartNs = SystemClock.elapsedRealtimeNanos()
-                val body = buildDifixMultipartBody(capture)
-                val bodyBuildMs = elapsedMs(bodyStartNs)
-                val postResult = postDifixMultipart("$generateBackendBase/difix/refine", body, 240_000)
-                val processStartNs = SystemClock.elapsedRealtimeNanos()
-                val decodeStartNs = SystemClock.elapsedRealtimeNanos()
-                val bitmap = BitmapFactory.decodeByteArray(postResult.imageBytes, 0, postResult.imageBytes.size)
-                    ?: throw IllegalArgumentException("failed to decode Difix image")
-                val responseDecodeMs = elapsedMs(decodeStartNs)
-                val compositeStartNs = SystemClock.elapsedRealtimeNanos()
-                val displayBitmap = displayCompositeBitmap(capture, bitmap)
-                val displayCompositeMs = elapsedMs(compositeStartNs)
-                difixDataUrl = "data:${postResult.contentType};base64,${Base64.encodeToString(postResult.imageBytes, Base64.NO_WRAP)}"
-                finalBitmap = bitmap
-                displayMode = DisplayMode.DIFIX
-                val processBeforeUiMs = elapsedMs(processStartNs)
-                runOnUiThread {
-                    val uiStartNs = SystemClock.elapsedRealtimeNanos()
-                    overlay.setImageBitmap(displayBitmap)
-                    overlay.visibility = View.VISIBLE
-                    updateViewerControls()
-                    val uiDisplayMs = elapsedMs(uiStartNs)
-                    val totalToDisplayedMs = elapsedMs(flowStartNs)
-                    Log.i(
-                        TAG,
-                        "Difix binary profile capture=${capture.width}x${capture.height} " +
-                            "bodyBuildMs=$bodyBuildMs connectMs=${postResult.connectMs} " +
-                            "uploadMs=${postResult.uploadMs} serverWaitFirstByteMs=${postResult.serverWaitFirstByteMs} " +
-                            "serverWaitHeadersMs=${postResult.serverWaitHeadersMs} " +
-                            "responseDownloadMs=${postResult.responseDownloadMs} " +
-                            "responseDecodeMs=$responseDecodeMs displayCompositeMs=$displayCompositeMs " +
-                            "processBeforeUiMs=$processBeforeUiMs uiDisplayMs=$uiDisplayMs " +
-                            "totalToDisplayedMs=$totalToDisplayedMs requestBytes=${body.bytes.size} " +
-                            "responseBytes=${postResult.imageBytes.size} httpStatus=${postResult.httpStatus} " +
-                            "serverTiming=${postResult.serverTimingJson?.take(220) ?: "-"}"
-                    )
-                    setPipelineStatus("Difix done in ${totalToDisplayedMs}ms (${capture.width}x${capture.height})")
-                }
-            } catch (exc: Exception) {
-                difixBusy = false
-                val photo = currentViewerPhoto
-                runOnUiThread {
-                    setPipelineStatus("Difix failed: ${exc.message}")
-                    if (photo != null) {
-                        showGenerateUnavailable(photo, generateBackendBase, "difix", exc.message ?: exc.javaClass.simpleName)
-                    }
-                }
-            } finally {
-                difixBusy = false
-            }
+            setPipelineStatus("Captured ${capture.width}x${capture.height}; ready to Generate")
         }
     }
 
@@ -2409,8 +2333,7 @@ class MainActivity : Activity() {
 
     private fun generateFlux() {
         val capture = latestCapture ?: return
-        val difix = difixDataUrl ?: return
-        if (fluxBusy) return
+        if (difixBusy || fluxBusy) return
         val generateBackendBase = backendBaseUrl()
         if (requiresCloudLogin(generateBackendBase) && !SupabaseAuth.isLoggedIn()) {
             setPipelineStatus("Sign in to use WiCi Cloud Generate")
@@ -2421,13 +2344,19 @@ class MainActivity : Activity() {
             }
             return
         }
-        fluxBusy = true
+        fluxDataUrl = null
+        finalBitmap = null
+        displayMode = DisplayMode.RAW
+        difixBusy = true
+        fluxBusy = false
         clearGenerateErrorOverlay()
         runOnUiThread {
+            overlay.visibility = View.GONE
             updateViewerControls()
             setPipelineStatus("Checking Generate services...")
         }
         networkExecutor.execute {
+            var failureStage = "difix"
             try {
                 val health = checkGenerateHealth(generateBackendBase)
                 if (!health.ok) {
@@ -2436,6 +2365,7 @@ class MainActivity : Activity() {
                         "Generate health failed base=$generateBackendBase service=${health.service ?: "-"} " +
                             "elapsedMs=${health.elapsedMs} error=${health.message}"
                     )
+                    difixBusy = false
                     fluxBusy = false
                     val photo = currentViewerPhoto
                     runOnUiThread {
@@ -2454,12 +2384,37 @@ class MainActivity : Activity() {
                 val started = System.nanoTime()
                 val photo = currentViewerPhoto
                 val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
-                runOnUiThread { setPipelineStatus("Generating final image...") }
+                runOnUiThread { setPipelineStatus("Running Difix...") }
+                val bodyStartNs = SystemClock.elapsedRealtimeNanos()
+                val difixBody = buildDifixMultipartBody(capture)
+                val bodyBuildMs = elapsedMs(bodyStartNs)
+                val difixPostResult = postDifixMultipart("$generateBackendBase/difix/refine", difixBody, 240_000)
+                val difixData = "data:${difixPostResult.contentType};base64," +
+                    Base64.encodeToString(difixPostResult.imageBytes, Base64.NO_WRAP)
+                Log.i(
+                    TAG,
+                    "Difix binary profile capture=${capture.width}x${capture.height} " +
+                        "bodyBuildMs=$bodyBuildMs connectMs=${difixPostResult.connectMs} " +
+                        "uploadMs=${difixPostResult.uploadMs} " +
+                        "serverWaitFirstByteMs=${difixPostResult.serverWaitFirstByteMs} " +
+                        "serverWaitHeadersMs=${difixPostResult.serverWaitHeadersMs} " +
+                        "responseDownloadMs=${difixPostResult.responseDownloadMs} " +
+                        "requestBytes=${difixBody.bytes.size} responseBytes=${difixPostResult.imageBytes.size} " +
+                        "httpStatus=${difixPostResult.httpStatus} " +
+                        "serverTiming=${difixPostResult.serverTimingJson?.take(220) ?: "-"}"
+                )
+                failureStage = "flux"
+                difixBusy = false
+                fluxBusy = true
+                runOnUiThread {
+                    updateViewerControls()
+                    setPipelineStatus("Generating final image...")
+                }
                 val metrics = captureMetrics(capture)
                 val body = JSONObject()
                     .put("photoId", photoId)
                     .put("ply", capture.assetName)
-                    .put("image", difix)
+                    .put("image", difixData)
                     .put("mask", capture.peripheralMaskDataUrl)
                     .put("metrics", metrics)
                 if (photo?.imported == true && photo.localUri != null) {
@@ -2474,21 +2429,24 @@ class MainActivity : Activity() {
                 finalBitmap = bitmap
                 displayMode = DisplayMode.FLUX
                 val elapsed = (System.nanoTime() - started) / 1_000_000
+                difixBusy = false
                 fluxBusy = false
                 runOnUiThread {
                     overlay.setImageBitmap(bitmap)
                     overlay.visibility = View.VISIBLE
                     updateViewerControls()
-                    setPipelineStatus("FLUX done in ${elapsed}ms (${bitmap.width}x${bitmap.height})")
+                    setPipelineStatus("Generate done in ${elapsed}ms (${bitmap.width}x${bitmap.height})")
                 }
             } catch (exc: Exception) {
+                difixBusy = false
                 fluxBusy = false
                 val photo = currentViewerPhoto
                 runOnUiThread {
                     updateViewerControls()
-                    setPipelineStatus("FLUX failed: ${exc.message}")
+                    val stageLabel = if (failureStage == "difix") "Difix" else "FLUX"
+                    setPipelineStatus("$stageLabel failed: ${exc.message}")
                     if (photo != null) {
-                        showGenerateUnavailable(photo, generateBackendBase, "flux", exc.message ?: exc.javaClass.simpleName)
+                        showGenerateUnavailable(photo, generateBackendBase, failureStage, exc.message ?: exc.javaClass.simpleName)
                     }
                 }
             }
@@ -2525,118 +2483,6 @@ class MainActivity : Activity() {
 
     private fun setPipelineStatus(message: String) {
         Log.i(TAG, message)
-    }
-
-    private fun displayCompositeBitmap(capture: ReleaseCapture, result: Bitmap): Bitmap {
-        return try {
-            // Display-only: keep Difix/FLUX payloads raw, but soften the visible binary mask edge.
-            val w = result.width
-            val h = result.height
-            val preview = decodeDataUrl(capture.previewDataUrl).fitTo(w, h)
-            val mask = decodeDataUrl(capture.peripheralMaskDataUrl).fitTo(w, h)
-            val resultPixels = IntArray(w * h)
-            val previewPixels = IntArray(w * h)
-            val maskPixels = IntArray(w * h)
-            result.getPixels(resultPixels, 0, w, 0, 0, w, h)
-            preview.getPixels(previewPixels, 0, w, 0, 0, w, h)
-            mask.getPixels(maskPixels, 0, w, 0, 0, w, h)
-            val peripheral = BooleanArray(w * h)
-            for (i in peripheral.indices) peripheral[i] = (maskPixels[i] and 0xff) > 127
-            val edgeAlpha = peripheralBoundaryAlpha(peripheral, w, h, DISPLAY_EDGE_FEATHER_PX)
-            val out = IntArray(w * h)
-            for (i in out.indices) {
-                val a = edgeAlpha[i].coerceIn(0f, 1f)
-                if (a <= 0f) {
-                    out[i] = resultPixels[i] or -0x1000000
-                } else if (a >= 1f) {
-                    out[i] = previewPixels[i] or -0x1000000
-                } else {
-                    val keep = 1f - a
-                    val resultColor = resultPixels[i]
-                    val previewColor = previewPixels[i]
-                    val r = (((resultColor ushr 16) and 0xff) * keep + ((previewColor ushr 16) and 0xff) * a).roundToInt().coerceIn(0, 255)
-                    val g = (((resultColor ushr 8) and 0xff) * keep + ((previewColor ushr 8) and 0xff) * a).roundToInt().coerceIn(0, 255)
-                    val b = ((resultColor and 0xff) * keep + (previewColor and 0xff) * a).roundToInt().coerceIn(0, 255)
-                    out[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
-                }
-            }
-            Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
-        } catch (exc: Exception) {
-            Log.w(TAG, "Display edge composite failed: ${exc.message}")
-            result
-        }
-    }
-
-    private fun Bitmap.fitTo(w: Int, h: Int): Bitmap =
-        if (width == w && height == h) this else Bitmap.createScaledBitmap(this, w, h, true)
-
-    private fun peripheralBoundaryAlpha(peripheral: BooleanArray, w: Int, h: Int, featherPx: Int): FloatArray {
-        val n = w * h
-        val alpha = FloatArray(n)
-        if (featherPx <= 0) return alpha
-        val seen = BooleanArray(n)
-        val frontier = IntArray(n)
-        val next = IntArray(n)
-        var frontierCount = 0
-
-        fun seed(idx: Int) {
-            if (idx < 0 || idx >= n || seen[idx]) return
-            seen[idx] = true
-            alpha[idx] = 1f
-            frontier[frontierCount++] = idx
-        }
-
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val idx = y * w + x
-                if (x < w - 1) {
-                    val right = idx + 1
-                    if (peripheral[idx] != peripheral[right]) {
-                        seed(idx)
-                        seed(right)
-                    }
-                }
-                if (y < h - 1) {
-                    val down = idx + w
-                    if (peripheral[idx] != peripheral[down]) {
-                        seed(idx)
-                        seed(down)
-                    }
-                }
-            }
-        }
-
-        fun add(idx: Int, value: Float, nextCount: Int): Int {
-            if (idx < 0 || idx >= n || seen[idx]) return nextCount
-            seen[idx] = true
-            alpha[idx] = value
-            next[nextCount] = idx
-            return nextCount + 1
-        }
-
-        var count = frontierCount
-        for (step in 1..featherPx) {
-            val t = 1f - (step.toFloat() / (featherPx + 1f))
-            val smooth = t * t * (3f - 2f * t)
-            var nextCount = 0
-            for (i in 0 until count) {
-                val idx = frontier[i]
-                val x = idx % w
-                val y = idx / w
-                if (x > 0) nextCount = add(idx - 1, smooth, nextCount)
-                if (x < w - 1) nextCount = add(idx + 1, smooth, nextCount)
-                if (y > 0) nextCount = add(idx - w, smooth, nextCount)
-                if (y < h - 1) nextCount = add(idx + w, smooth, nextCount)
-                if (x > 0 && y > 0) nextCount = add(idx - w - 1, smooth, nextCount)
-                if (x < w - 1 && y > 0) nextCount = add(idx - w + 1, smooth, nextCount)
-                if (x > 0 && y < h - 1) nextCount = add(idx + w - 1, smooth, nextCount)
-                if (x < w - 1 && y < h - 1) nextCount = add(idx + w + 1, smooth, nextCount)
-            }
-            for (i in 0 until nextCount) frontier[i] = next[i]
-            count = nextCount
-            if (count == 0) break
-        }
-        return alpha
     }
 
     private fun postJson(url: String, body: JSONObject, timeoutMs: Int): JSONObject {
@@ -3939,8 +3785,7 @@ class MainActivity : Activity() {
 
     private fun handleStageAction() {
         when (displayMode) {
-            DisplayMode.RAW -> Unit
-            DisplayMode.DIFIX -> generateFlux()
+            DisplayMode.RAW -> generateFlux()
             DisplayMode.FLUX -> saveFinalImage()
         }
     }
@@ -3951,14 +3796,13 @@ class MainActivity : Activity() {
             generateButton.visibility = View.GONE
             return
         }
-        if (displayMode == DisplayMode.DIFIX && difixDataUrl == null) displayMode = DisplayMode.RAW
         if (displayMode == DisplayMode.FLUX && fluxDataUrl == null) {
-            displayMode = if (difixDataUrl != null) DisplayMode.DIFIX else DisplayMode.RAW
+            displayMode = DisplayMode.RAW
         }
-        val hasDifix = difixDataUrl != null
+        val hasCapture = latestCapture != null
         val hasFlux = fluxDataUrl != null
         when {
-            fluxBusy -> {
+            difixBusy || fluxBusy -> {
                 generateButton.visibility = View.VISIBLE
                 styleStageButton("Generating...", enabled = false, busy = true)
             }
@@ -3966,7 +3810,7 @@ class MainActivity : Activity() {
                 generateButton.visibility = View.VISIBLE
                 styleStageButton("Download", enabled = true, busy = false)
             }
-            hasDifix && displayMode == DisplayMode.DIFIX -> {
+            hasCapture -> {
                 generateButton.visibility = View.VISIBLE
                 styleStageButton("Generate", enabled = true, busy = false)
             }
@@ -4221,7 +4065,6 @@ class MainActivity : Activity() {
 
     private enum class DisplayMode {
         RAW,
-        DIFIX,
         FLUX
     }
 
@@ -4393,7 +4236,6 @@ class MainActivity : Activity() {
         private const val BACKEND_HEALTH_TIMEOUT_MS = 2_500
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
-        private const val DISPLAY_EDGE_FEATHER_PX = 24
         private const val EDIT_JIGGLE_DEGREES = 1.5f
         private const val EDIT_JIGGLE_DURATION_MS = 150L
         private const val EDIT_LONG_PRESS_MS = 520L
