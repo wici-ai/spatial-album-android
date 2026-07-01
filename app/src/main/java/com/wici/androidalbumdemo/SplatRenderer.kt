@@ -94,6 +94,7 @@ class SplatRenderer(
     private var statsDrawNs = 0L
     private var releaseCaptureRequested = false
     private var releaseCaptureReason = "unknown"
+    private var lastReleaseCaptureDeferredLogMs = 0L
     private val captureRunning = AtomicBoolean(false)
 
     private var splatProgram = 0
@@ -1879,8 +1880,37 @@ class SplatRenderer(
 
     private fun maybeCaptureRelease(m: SplatModel) {
         if (!releaseCaptureRequested) return
-        releaseCaptureRequested = false
         val reason = releaseCaptureReason
+        if (streamError != null) {
+            releaseCaptureRequested = false
+            Log.w(TAG, "releaseCaptureCancelled reason=$reason streamError=$streamError")
+            status("Release capture skipped: splat failed to load")
+            return
+        }
+        val pendingSortExists = synchronized(pendingSortLock) { pendingSort != null }
+        val readyForCapture =
+            !isProgressiveLoadInFlight() &&
+                !interactionActive &&
+                hasUploadedInstances &&
+                uploadedInstanceCount >= m.count &&
+                !sortDirty &&
+                !sortRunning.get() &&
+                !pendingSortExists
+        if (!readyForCapture) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastReleaseCaptureDeferredLogMs > 250L) {
+                lastReleaseCaptureDeferredLogMs = now
+                Log.i(
+                    TAG,
+                    "releaseCaptureDeferred reason=$reason loaded=${m.count} expected=$streamExpectedCount " +
+                        "streamComplete=$streamComplete interactionActive=$interactionActive " +
+                        "uploaded=$uploadedInstanceCount hasUploaded=$hasUploadedInstances sortDirty=$sortDirty " +
+                        "sortRunning=${sortRunning.get()} pendingSort=$pendingSortExists"
+                )
+            }
+            return
+        }
+        releaseCaptureRequested = false
         if (!captureRunning.compareAndSet(false, true)) {
             Log.i(TAG, "releaseCaptureSkipped reason=$reason alreadyRunning=true")
             return
