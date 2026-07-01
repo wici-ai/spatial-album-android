@@ -54,6 +54,8 @@ class SplatRenderer(
     camCx: Float? = null,
     camCy: Float? = null,
     private val splatStreamUrl: String? = null,
+    private val splatStreamEndpointUrl: String? = null,
+    private val ingestEndpointUrl: String? = null,
     private val ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
     private val networkStreamEnabled: Boolean = true
@@ -996,7 +998,7 @@ class SplatRenderer(
             val url = splatStreamUrl
                 ?.takeIf { it.isNotBlank() }
                 ?.let { appendDensityIfNeeded(it, requestedStreamDensity) }
-                ?: "$SPLAT_STREAM_URL?photoId=${URLEncoder.encode(streamId, "UTF-8")}$densityParam"
+                ?: "${splatStreamEndpointUrl ?: SPLAT_STREAM_URL}?photoId=${URLEncoder.encode(streamId, "UTF-8")}$densityParam"
             val cacheKey = SplatCache.keyFor(streamId, requestedStreamDensity ?: "backend-default")
             SplatCache.lookup(context, cacheKey, SPLAT_ROW_BYTES)?.let { entry ->
                 loadCachedSplat(streamId, entry)
@@ -1103,7 +1105,7 @@ class SplatRenderer(
             val upload = buildIngestUploadPayload(streamId, imageUriString)
             uploadBytes = upload.bytes.size.toLong()
             val boundary = "----WiciAndroidRenderer${SystemClock.elapsedRealtimeNanos()}"
-            conn = (URL(INGEST_URL).openConnection() as HttpURLConnection).apply {
+            conn = (URL(ingestEndpointUrl ?: INGEST_URL).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 connectTimeout = 8_000
                 readTimeout = 300_000
@@ -2206,8 +2208,8 @@ class SplatRenderer(
 
     companion object {
         private const val TAG = "AlbumGLESPerf"
-        private const val SPLAT_STREAM_URL = "http://47.186.21.5:54228/orbit/splat_stream"
-        private const val INGEST_URL = "http://47.186.21.5:54228/orbit/ingest"
+        private const val SPLAT_STREAM_URL = "http://app.wici.ai:54228/orbit/splat_stream"
+        private const val INGEST_URL = "http://app.wici.ai:54228/orbit/ingest"
         private const val INGEST_SPLAT_ACCEPT_HEADER = "X-Wici-Splat-Accept"
         private const val INGEST_SPLAT_STREAM_HEADER = "X-Wici-Splat-Stream"
         private const val INGEST_SPLAT_FORMAT_FP16_V1 = "fp16v1"

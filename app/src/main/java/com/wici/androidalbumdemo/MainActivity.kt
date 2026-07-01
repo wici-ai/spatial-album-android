@@ -1709,6 +1709,8 @@ class MainActivity : Activity() {
             photo.camCx,
             photo.camCy,
             photo.splatStreamUrl,
+            "${galleryUrl()}/splat_stream",
+            "${galleryUrl()}/ingest",
             photo.localUri?.takeIf { photo.imported }?.toString(),
             splatCacheMaxBytesOverride,
             networkStreamEnabled = !photo.imported || photo.localUri != null
@@ -3288,7 +3290,7 @@ class MainActivity : Activity() {
         private const val PREFS_NAME = "android-album-demo"
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
-        private const val DEFAULT_BACKEND_BASE_URL = "http://47.186.21.5:54228"
+        private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
         private const val DISPLAY_EDGE_FEATHER_PX = 24

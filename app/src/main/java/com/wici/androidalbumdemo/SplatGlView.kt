@@ -26,6 +26,8 @@ class SplatGlView(
     camCx: Float? = null,
     camCy: Float? = null,
     splatStreamUrl: String? = null,
+    splatStreamEndpointUrl: String? = null,
+    ingestEndpointUrl: String? = null,
     ingestImageUri: String? = null,
     splatCacheMaxBytes: Long? = null,
     networkStreamEnabled: Boolean = true
@@ -46,6 +48,8 @@ class SplatGlView(
         camCx,
         camCy,
         splatStreamUrl,
+        splatStreamEndpointUrl,
+        ingestEndpointUrl,
         ingestImageUri,
         splatCacheMaxBytes,
         networkStreamEnabled
