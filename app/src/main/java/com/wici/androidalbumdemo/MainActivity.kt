@@ -4,6 +4,7 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.res.ColorStateList
 import android.content.ContentValues
 import android.content.Context
@@ -30,6 +31,7 @@ import android.os.Looper
 import android.os.Parcelable
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.text.InputType
 import android.text.TextUtils
 import android.util.Base64
 import android.util.Log
@@ -43,6 +45,7 @@ import android.widget.BaseAdapter
 import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -229,6 +232,26 @@ class MainActivity : Activity() {
         }
         stylePreviewToggle(previewToggle, false)
         albumActionButton = previewToggle
+        val settingsButton = TextView(this).apply {
+            text = "Settings"
+            textSize = 12f
+            typeface = inter(600)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            minHeight = dp(38)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Backend settings"
+            setOnClickListener { showBackendSettingsDialog() }
+        }
+        styleSettingsButton(settingsButton)
+        header.addView(
+            settingsButton,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)).apply {
+                rightMargin = dp(8)
+            }
+        )
         header.addView(previewToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
         root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
@@ -815,7 +838,7 @@ class MainActivity : Activity() {
             "android-preview-${System.currentTimeMillis()}.${extensionForMime(mime)}"
         }
         val tmp = File(outFile.parentFile, "${outFile.name}.tmp-${SystemClock.elapsedRealtimeNanos()}")
-        val conn = (URL("$GALLERY_URL/ingest_preview").openConnection() as HttpURLConnection).apply {
+        val conn = (URL("${galleryUrl()}/ingest_preview").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8_000
             readTimeout = 120_000
@@ -1000,7 +1023,7 @@ class MainActivity : Activity() {
         val url = photo.orbitWebpUrl
             ?: photo.orbitPreviewUrl
             ?: if (photo.hasOrbit && !photo.imported) {
-                "$ORBIT_PREVIEW_URL?photoId=${Uri.encode(photo.photoId)}&format=webp"
+                "${orbitPreviewUrl()}?photoId=${Uri.encode(photo.photoId)}&format=webp"
             } else {
                 null
             }
@@ -1874,7 +1897,7 @@ class MainActivity : Activity() {
                 val bodyStartNs = SystemClock.elapsedRealtimeNanos()
                 val body = buildDifixMultipartBody(capture)
                 val bodyBuildMs = elapsedMs(bodyStartNs)
-                val postResult = postDifixMultipart("$DIFIX_URL/refine", body, 240_000)
+                val postResult = postDifixMultipart("${difixUrl()}/refine", body, 240_000)
                 val processStartNs = SystemClock.elapsedRealtimeNanos()
                 val decodeStartNs = SystemClock.elapsedRealtimeNanos()
                 val bitmap = BitmapFactory.decodeByteArray(postResult.imageBytes, 0, postResult.imageBytes.size)
@@ -2024,7 +2047,7 @@ class MainActivity : Activity() {
                     body.put("source", localSourceDataUrl(photo))
                     metrics.put("transportMode", "android-local-source-data-url+jpeg")
                 }
-                val response = postJson("$FLUX_URL/fill", body, 300_000)
+                val response = postJson("${fluxUrl()}/fill", body, 300_000)
                 val image = response.getString("image")
                 val bitmap = decodeDataUrl(image)
                 fluxDataUrl = image
@@ -2322,7 +2345,7 @@ class MainActivity : Activity() {
         var commitMs = -1L
         var serverTimingJson: String? = null
         var serverSharpMs: Double? = null
-        val conn = (URL("$GALLERY_URL/ingest").openConnection() as HttpURLConnection).apply {
+        val conn = (URL("${galleryUrl()}/ingest").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8_000
             readTimeout = 300_000
@@ -2441,7 +2464,7 @@ class MainActivity : Activity() {
         val boundary = "----WiciAndroidAlbum${SystemClock.elapsedRealtimeNanos()}"
         val mime = contentResolver.getType(imageUri) ?: "image/jpeg"
         val filename = "android-import-${System.currentTimeMillis()}.${extensionForMime(mime)}"
-        val conn = (URL("$GALLERY_URL/ingest").openConnection() as HttpURLConnection).apply {
+        val conn = (URL("${galleryUrl()}/ingest").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8_000
             readTimeout = 300_000
@@ -2701,6 +2724,112 @@ class MainActivity : Activity() {
         applySoftShadow(view, if (enabled) 3 else 2)
     }
 
+    private fun styleSettingsButton(view: TextView) {
+        view.setTextColor(COLOR_INK_SOFT)
+        view.background = rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+        applySoftShadow(view, 2)
+    }
+
+    private fun showBackendSettingsDialog() {
+        val input = EditText(this).apply {
+            setSingleLine(true)
+            setText(backendBaseUrl())
+            setSelectAllOnFocus(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            textSize = 14f
+            typeface = inter(500)
+            setTextColor(COLOR_INK)
+            setHintTextColor(COLOR_INK_SOFT)
+            hint = DEFAULT_BACKEND_BASE_URL
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), 0)
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Backend base URL"
+                    setTextColor(COLOR_INK)
+                    textSize = 18f
+                    typeface = inter(700)
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Use scheme, host, and port. Example: $DEFAULT_BACKEND_BASE_URL"
+                    setTextColor(COLOR_INK_SOFT)
+                    textSize = 12f
+                    typeface = inter(500)
+                    setPadding(0, dp(8), 0, dp(10))
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            )
+            addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setView(content)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(COLOR_ACCENT)
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(COLOR_INK_SOFT)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
+                if (normalized == null) {
+                    input.error = "Use http(s)://host:port with no path"
+                    return@setOnClickListener
+                }
+                saveBackendBaseUrl(normalized)
+                albumStatus?.text = "BACKEND UPDATED"
+                Log.i(TAG, "Backend base URL updated base=$normalized gallery=${galleryUrl()}")
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun backendBaseUrl(): String {
+        val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(PREF_BACKEND_BASE_URL, null)
+        return normalizeBackendBaseUrl(saved.orEmpty()) ?: DEFAULT_BACKEND_BASE_URL
+    }
+
+    private fun saveBackendBaseUrl(value: String) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(PREF_BACKEND_BASE_URL, value)
+            .apply()
+    }
+
+    private fun normalizeBackendBaseUrl(value: String): String? {
+        val trimmed = value.trim().trimEnd('/')
+        if (trimmed.isBlank()) return null
+        val uri = try {
+            Uri.parse(trimmed)
+        } catch (_: Exception) {
+            return null
+        }
+        val scheme = uri.scheme?.lowercase()
+        val host = uri.host
+        val port = uri.port
+        val hasOnlyRootPath = uri.path.isNullOrBlank() || uri.path == "/"
+        if (scheme !in setOf("http", "https")) return null
+        if (host.isNullOrBlank() || port !in 1..65535) return null
+        if (!hasOnlyRootPath || !uri.query.isNullOrBlank() || !uri.fragment.isNullOrBlank()) return null
+        return "$scheme://$host:$port"
+    }
+
+    private fun galleryUrl(): String = "${backendBaseUrl()}/orbit"
+
+    private fun difixUrl(): String = "${backendBaseUrl()}/difix"
+
+    private fun fluxUrl(): String = "${backendBaseUrl()}/flux"
+
+    private fun orbitPreviewUrl(): String = "${galleryUrl()}/orbit_preview"
+
     private fun studioBackButton(): View =
         ChevronButton(this).apply {
             contentDescription = "back"
@@ -2864,8 +2993,8 @@ class MainActivity : Activity() {
     private fun absoluteGalleryUrl(pathOrUrl: String): String =
         when {
             pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://") -> pathOrUrl
-            pathOrUrl.startsWith("/") -> "$GALLERY_URL$pathOrUrl"
-            else -> "$GALLERY_URL/$pathOrUrl"
+            pathOrUrl.startsWith("/") -> "${galleryUrl()}$pathOrUrl"
+            else -> "${galleryUrl()}/$pathOrUrl"
         }
 
     private fun dp(value: Int): Int =
@@ -3142,6 +3271,8 @@ class MainActivity : Activity() {
         private const val PREVIEW_TAG = "AlbumPreview"
         private const val PREFS_NAME = "android-album-demo"
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
+        private const val PREF_BACKEND_BASE_URL = "backend_base_url"
+        private const val DEFAULT_BACKEND_BASE_URL = "http://47.186.21.5:54228"
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
         private const val DISPLAY_EDGE_FEATHER_PX = 24
@@ -3156,10 +3287,6 @@ class MainActivity : Activity() {
         private val COLOR_ACCENT = 0xFF5B5BFF.toInt()
         private val COLOR_ACCENT_PRESS = 0xFF4A47E0.toInt()
         private val COLOR_DELETE = 0xFFFF3B30.toInt()
-        private const val DIFIX_URL = "http://47.186.21.5:54228/difix"
-        private const val FLUX_URL = "http://47.186.21.5:54228/flux"
-        private const val GALLERY_URL = "http://47.186.21.5:54228/orbit"
-        private const val ORBIT_PREVIEW_URL = "http://47.186.21.5:54228/orbit/orbit_preview"
         private const val ORBIT_PREVIEW_CACHE_VERSION = "webp360-v1"
         private const val ORBIT_PREVIEW_CACHE_MAX_BYTES = 96L * 1024L * 1024L
         private const val PREVIEW_BAKE_CONCURRENCY = 3
