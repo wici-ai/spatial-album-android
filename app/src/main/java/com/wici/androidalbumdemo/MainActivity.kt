@@ -24,6 +24,8 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -58,6 +60,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
@@ -110,6 +113,12 @@ class MainActivity : Activity() {
     private var albumScrollParcelable: Parcelable? = null
     private var nextImportedOrdinal = 1
     private var albumEditMode = false
+    private val backendHandler = Handler(Looper.getMainLooper())
+    private var discoveredBackendBaseUrl: String? = null
+    private var backendDiscoveryInProgress = false
+    private var backendDiscoveryCompleted = false
+    private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private var nsdResolveInFlight = false
     private val interBase: Typeface by lazy { resources.getFont(R.font.inter_variable) }
     private val spaceGroteskBase: Typeface by lazy { resources.getFont(R.font.space_grotesk_variable) }
 
@@ -135,6 +144,7 @@ class MainActivity : Activity() {
         } else {
             null
         }
+        startBackendDiscoveryIfNeeded()
         val requestedAsset = intent.getStringExtra("asset")
         if (requestedAsset != null) {
             val requestedPhotoId = intent.getStringExtra("photoId")
@@ -1871,6 +1881,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         previewHandler.removeCallbacksAndMessages(null)
+        backendHandler.removeCallbacksAndMessages(null)
+        stopBackendDiscovery()
         glView?.shutdown()
         networkExecutor.shutdownNow()
         previewBakeExecutor.shutdownNow()
@@ -2735,9 +2747,16 @@ class MainActivity : Activity() {
     }
 
     private fun showBackendSettingsDialog() {
+        val status = TextView(this).apply {
+            text = backendSettingsSummary()
+            setTextColor(COLOR_INK_SOFT)
+            textSize = 12f
+            typeface = inter(500)
+            setPadding(0, dp(8), 0, dp(10))
+        }
         val input = EditText(this).apply {
             setSingleLine(true)
-            setText(backendBaseUrl())
+            setText(manualBackendBaseUrl() ?: backendBaseUrl())
             setSelectAllOnFocus(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             textSize = 14f
@@ -2769,10 +2788,12 @@ class MainActivity : Activity() {
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
+            addView(status, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
         val dialog = AlertDialog.Builder(this)
             .setView(content)
+            .setNeutralButton("Use Auto", null)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Save", null)
             .create()
@@ -2780,6 +2801,14 @@ class MainActivity : Activity() {
             dialog.window?.setBackgroundDrawable(rounded(COLOR_SURFACE, dp(18).toFloat()))
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(COLOR_ACCENT)
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(COLOR_INK_SOFT)
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(COLOR_INK_SOFT)
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                clearBackendBaseUrlOverride()
+                input.setText(backendBaseUrl())
+                status.text = backendSettingsSummary()
+                albumStatus?.text = "AUTO BACKEND"
+                Log.i(TAG, "Backend manual override cleared effective=${backendBaseUrl()} source=${backendSourceLabel()}")
+            }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val normalized = normalizeBackendBaseUrl(input.text?.toString().orEmpty())
                 if (normalized == null) {
@@ -2788,24 +2817,57 @@ class MainActivity : Activity() {
                 }
                 saveBackendBaseUrl(normalized)
                 albumStatus?.text = "BACKEND UPDATED"
-                Log.i(TAG, "Backend base URL updated base=$normalized gallery=${galleryUrl()}")
+                Log.i(TAG, "Backend base URL updated base=$normalized source=${backendSourceLabel()} gallery=${galleryUrl()}")
                 dialog.dismiss()
             }
         }
         dialog.show()
     }
 
-    private fun backendBaseUrl(): String {
+    private fun manualBackendBaseUrl(): String? {
         val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getString(PREF_BACKEND_BASE_URL, null)
-        return normalizeBackendBaseUrl(saved.orEmpty()) ?: DEFAULT_BACKEND_BASE_URL
+        return normalizeBackendBaseUrl(saved.orEmpty())
+    }
+
+    private fun backendBaseUrl(): String {
+        manualBackendBaseUrl()?.let { return it }
+        discoveredBackendBaseUrl?.let { return it }
+        return DEFAULT_BACKEND_BASE_URL
     }
 
     private fun saveBackendBaseUrl(value: String) {
+        stopBackendDiscovery()
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .edit()
             .putString(PREF_BACKEND_BASE_URL, value)
             .apply()
+    }
+
+    private fun clearBackendBaseUrlOverride() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .remove(PREF_BACKEND_BASE_URL)
+            .apply()
+        startBackendDiscoveryIfNeeded(force = true)
+    }
+
+    private fun backendSourceLabel(): String =
+        when {
+            manualBackendBaseUrl() != null -> "manual"
+            discoveredBackendBaseUrl != null -> "discovered local"
+            backendDiscoveryInProgress -> "cloud default while local discovery runs"
+            else -> "cloud default"
+        }
+
+    private fun backendSettingsSummary(): String {
+        val source = when {
+            manualBackendBaseUrl() != null -> "Manual override"
+            discoveredBackendBaseUrl != null -> "Discovered local backend"
+            backendDiscoveryInProgress -> "Cloud default while local discovery runs"
+            else -> "Cloud default"
+        }
+        return "Current: ${backendBaseUrl()}\nSource: $source"
     }
 
     private fun normalizeBackendBaseUrl(value: String): String? {
@@ -2833,6 +2895,179 @@ class MainActivity : Activity() {
     private fun fluxUrl(): String = "${backendBaseUrl()}/flux"
 
     private fun orbitPreviewUrl(): String = "${galleryUrl()}/orbit_preview"
+
+    private fun startBackendDiscoveryIfNeeded(force: Boolean = false) {
+        if (manualBackendBaseUrl() != null) {
+            stopBackendDiscovery()
+            return
+        }
+        if (!force && (backendDiscoveryInProgress || backendDiscoveryCompleted || discoveredBackendBaseUrl != null)) return
+        stopBackendDiscovery()
+        if (force) discoveredBackendBaseUrl = null
+        backendDiscoveryInProgress = true
+        backendDiscoveryCompleted = false
+        nsdResolveInFlight = false
+
+        val nsdManager = getSystemService(NSD_SERVICE) as? NsdManager
+        if (nsdManager == null) {
+            backendDiscoveryInProgress = false
+            backendDiscoveryCompleted = true
+            Log.w(TAG, "Backend NSD unavailable; using cloud default base=$DEFAULT_BACKEND_BASE_URL")
+            return
+        }
+
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(regType: String) {
+                Log.i(TAG, "Backend NSD discovery started type=$regType fallback=$DEFAULT_BACKEND_BASE_URL")
+            }
+
+            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                val type = serviceInfo.serviceType.orEmpty()
+                if (!type.trimEnd('.').equals(NSD_BACKEND_SERVICE_TYPE.trimEnd('.'), ignoreCase = true)) return
+                if (nsdResolveInFlight || manualBackendBaseUrl() != null) return
+                nsdResolveInFlight = true
+                Log.i(TAG, "Backend NSD service found name=${serviceInfo.serviceName} type=$type")
+                try {
+                    nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+                        override fun onResolveFailed(service: NsdServiceInfo, errorCode: Int) {
+                            nsdResolveInFlight = false
+                            Log.w(TAG, "Backend NSD resolve failed name=${service.serviceName} error=$errorCode")
+                        }
+
+                        override fun onServiceResolved(service: NsdServiceInfo) {
+                            val addresses = nsdHostAddresses(service)
+                            val host = chooseBackendHostAddress(addresses) ?: fallbackBackendHostAddress(service)
+                            val port = service.port
+                            val base = host?.let { normalizeBackendBaseUrl(httpBackendUrl(it, port)) }
+                            backendHandler.post {
+                                if (manualBackendBaseUrl() != null) return@post
+                                nsdResolveInFlight = false
+                                if (base != null) {
+                                    discoveredBackendBaseUrl = base
+                                    Log.i(
+                                        TAG,
+                                        "Backend NSD discovered local name=${service.serviceName} " +
+                                            "base=$base gallery=${galleryUrl()}"
+                                    )
+                                } else {
+                                    Log.w(
+                                        TAG,
+                                        "Backend NSD resolved no routable address name=${service.serviceName} " +
+                                            "port=$port addresses=${addresses.joinToString { it.hostAddress.orEmpty() }}"
+                                    )
+                                }
+                                finishBackendDiscovery("resolved")
+                            }
+                        }
+                    })
+                } catch (exc: Exception) {
+                    nsdResolveInFlight = false
+                    Log.w(TAG, "Backend NSD resolve threw", exc)
+                }
+            }
+
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "Backend NSD service lost name=${serviceInfo.serviceName}")
+            }
+
+            override fun onDiscoveryStopped(serviceType: String) {
+                Log.i(TAG, "Backend NSD discovery stopped type=$serviceType")
+            }
+
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "Backend NSD start failed type=$serviceType error=$errorCode")
+                backendHandler.post { finishBackendDiscovery("start-failed") }
+            }
+
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "Backend NSD stop failed type=$serviceType error=$errorCode")
+            }
+        }
+        nsdDiscoveryListener = listener
+        try {
+            nsdManager.discoverServices(NSD_BACKEND_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            backendHandler.postDelayed({
+                if (backendDiscoveryInProgress) {
+                    Log.i(TAG, "Backend NSD discovery timeout fallback=$DEFAULT_BACKEND_BASE_URL")
+                    finishBackendDiscovery("timeout")
+                }
+            }, NSD_DISCOVERY_TIMEOUT_MS)
+        } catch (exc: Exception) {
+            Log.w(TAG, "Backend NSD discovery threw", exc)
+            finishBackendDiscovery("exception")
+        }
+    }
+
+    private fun finishBackendDiscovery(reason: String) {
+        backendDiscoveryInProgress = false
+        backendDiscoveryCompleted = true
+        backendHandler.removeCallbacksAndMessages(null)
+        stopBackendDiscovery()
+        Log.i(TAG, "Backend NSD discovery finished reason=$reason effective=${backendBaseUrl()} source=${backendSourceLabel()}")
+    }
+
+    private fun stopBackendDiscovery() {
+        val listener = nsdDiscoveryListener ?: return
+        nsdDiscoveryListener = null
+        try {
+            (getSystemService(NSD_SERVICE) as? NsdManager)?.stopServiceDiscovery(listener)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun httpBackendUrl(host: String, port: Int): String {
+        val withoutZone = host.substringBefore('%')
+        val hostPart = if (withoutZone.contains(":") && !withoutZone.startsWith("[")) "[$withoutZone]" else withoutZone
+        return "http://$hostPart:$port"
+    }
+
+    private fun nsdHostAddresses(service: NsdServiceInfo): List<InetAddress> {
+        val addresses = mutableListOf<InetAddress>()
+        try {
+            val method = service.javaClass.methods.firstOrNull {
+                it.name == "getHostAddresses" && it.parameterTypes.isEmpty()
+            }
+            val values = method?.invoke(service) as? Iterable<*>
+            values?.forEach { value ->
+                if (value is InetAddress) addresses += value
+            }
+        } catch (exc: Exception) {
+            Log.d(TAG, "Backend NSD multi-address unavailable: ${exc.message}")
+        }
+        service.host?.let { addresses += it }
+        return addresses.distinctBy { it.hostAddress.orEmpty() }
+    }
+
+    private fun chooseBackendHostAddress(addresses: List<InetAddress>): String? {
+        val routable = addresses.filterNot {
+            it.isAnyLocalAddress || it.isLoopbackAddress || it.isLinkLocalAddress
+        }
+        val ipv4 = routable.firstOrNull { !it.hostAddress.orEmpty().contains(":") }
+        return (ipv4 ?: routable.firstOrNull())?.hostAddress?.substringBefore('%')
+    }
+
+    private fun fallbackBackendHostAddress(service: NsdServiceInfo): String? {
+        val serviceName = service.serviceName.orEmpty()
+        val hostLabel = serviceName.substringAfter(" on ", missingDelimiterValue = "")
+            .trim()
+            .trimEnd('.')
+            .takeIf { it.isNotBlank() && it.all { ch -> ch.isLetterOrDigit() || ch == '-' || ch == '.' } }
+            ?: return null
+        val localHost = if (hostLabel.endsWith(".local", ignoreCase = true)) hostLabel else "$hostLabel.local"
+        return try {
+            val resolved = InetAddress.getAllByName(localHost).toList()
+            val chosen = chooseBackendHostAddress(resolved)
+            Log.i(
+                TAG,
+                "Backend NSD hostname fallback host=$localHost " +
+                    "addresses=${resolved.joinToString { it.hostAddress.orEmpty() }} chosen=$chosen"
+            )
+            chosen
+        } catch (exc: Exception) {
+            Log.w(TAG, "Backend NSD hostname fallback failed host=$localHost: ${exc.message}")
+            null
+        }
+    }
 
     private fun studioBackButton(): View =
         ChevronButton(this).apply {
@@ -3324,6 +3559,8 @@ class MainActivity : Activity() {
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
         private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
+        private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
+        private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
         private const val ADD_TILE_ID = "__add_photo__"
         private const val SHOW_RENDER_DEBUG = false
         private const val DISPLAY_EDGE_FEATHER_PX = 24
