@@ -133,6 +133,7 @@ class MainActivity : Activity() {
         window.setBackgroundDrawable(ColorDrawable(COLOR_CANVAS))
         window.statusBarColor = COLOR_CANVAS
         window.navigationBarColor = COLOR_CANVAS
+        SupabaseAuth.init(this)
         removedCuratedPhotoIds.addAll(loadRemovedCuratedPhotoIds())
 
         releaseCaptureEnabled = !intent.getBooleanExtra("disableReleaseCapture", false)
@@ -1629,8 +1630,17 @@ class MainActivity : Activity() {
 
     private fun beginBackendCheckedViewer(photo: AlbumPhoto, reason: String) {
         val status = showReframingLoading(photo)
-        status.text = "Checking 3D server..."
         val base = backendBaseUrl()
+        if (requiresCloudLogin(base) && !SupabaseAuth.isLoggedIn()) {
+            status.text = "Sign in to use WiCi Cloud..."
+            promptCloudLogin("Reframe", onFailed = {
+                status.text = "Sign in with Google to use WiCi Cloud."
+            }) {
+                beginBackendCheckedViewer(photo, reason)
+            }
+            return
+        }
+        status.text = "Checking 3D server..."
         Log.i(TAG, "Backend health precheck start photoId=${photo.photoId} reason=$reason base=$base source=${backendSourceLabel()}")
         networkExecutor.execute {
             val health = checkOrbitHealth(base)
@@ -2250,6 +2260,19 @@ class MainActivity : Activity() {
         }
         difixBusy = true
         val generateBackendBase = backendBaseUrl()
+        if (requiresCloudLogin(generateBackendBase) && !SupabaseAuth.isLoggedIn()) {
+            difixBusy = false
+            runOnUiThread {
+                setPipelineStatus("Sign in to use WiCi Cloud Generate")
+                updateViewerControls()
+                promptCloudLogin("Generate", onFailed = {
+                    setPipelineStatus("Sign in with Google to use WiCi Cloud Generate")
+                }) {
+                    handleReleaseCapture(capture)
+                }
+            }
+            return
+        }
         networkExecutor.execute {
             try {
                 val flowStartNs = SystemClock.elapsedRealtimeNanos()
@@ -2391,9 +2414,18 @@ class MainActivity : Activity() {
         val capture = latestCapture ?: return
         val difix = difixDataUrl ?: return
         if (fluxBusy) return
+        val generateBackendBase = backendBaseUrl()
+        if (requiresCloudLogin(generateBackendBase) && !SupabaseAuth.isLoggedIn()) {
+            setPipelineStatus("Sign in to use WiCi Cloud Generate")
+            promptCloudLogin("Generate", onFailed = {
+                setPipelineStatus("Sign in with Google to use WiCi Cloud Generate")
+            }) {
+                generateFlux()
+            }
+            return
+        }
         fluxBusy = true
         clearGenerateErrorOverlay()
-        val generateBackendBase = backendBaseUrl()
         runOnUiThread {
             updateViewerControls()
             setPipelineStatus("Checking Generate services...")
@@ -3215,23 +3247,43 @@ class MainActivity : Activity() {
     }
 
     private fun googleAccountEmail(): String? =
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(PREF_GOOGLE_ACCOUNT_EMAIL, null)
-            ?.takeIf { it.isNotBlank() }
+        SupabaseAuth.email()?.takeIf { it.isNotBlank() }
 
     private fun clearGoogleAccount() {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .edit()
-            .remove(PREF_GOOGLE_ACCOUNT_EMAIL)
-            .apply()
+        SupabaseAuth.signOut()
+        Toast.makeText(this, "Signed out", Toast.LENGTH_SHORT).show()
     }
 
-    private fun beginGoogleSignIn() {
-        if (GOOGLE_OAUTH_CLIENT_ID.isBlank()) {
-            Toast.makeText(this, "Google sign-in coming soon", Toast.LENGTH_SHORT).show()
+    private fun beginGoogleSignIn(onComplete: ((Boolean) -> Unit)? = null) {
+        Toast.makeText(this, "Opening Google sign-in...", Toast.LENGTH_SHORT).show()
+        SupabaseAuth.signInWithGoogle(this) { success, message ->
+            if (success) {
+                val email = googleAccountEmail()
+                Toast.makeText(this, if (email == null) "Signed in" else "Signed in as $email", Toast.LENGTH_SHORT).show()
+                onComplete?.invoke(true)
+            } else {
+                val detail = message ?: "Sign-in failed"
+                Log.w(TAG, "Google sign-in failed: $detail")
+                Toast.makeText(this, detail, Toast.LENGTH_LONG).show()
+                onComplete?.invoke(false)
+            }
+        }
+    }
+
+    private fun promptCloudLogin(
+        operation: String,
+        onFailed: (() -> Unit)? = null,
+        onSignedIn: (() -> Unit)? = null
+    ) {
+        if (SupabaseAuth.isLoggedIn()) {
+            onSignedIn?.invoke()
             return
         }
-        Toast.makeText(this, "Google sign-in is not configured yet", Toast.LENGTH_SHORT).show()
+        Log.i(TAG, "Cloud login required operation=$operation base=${backendBaseUrl()}")
+        Toast.makeText(this, "Sign in to use WiCi Cloud for $operation", Toast.LENGTH_LONG).show()
+        beginGoogleSignIn { success ->
+            if (success) onSignedIn?.invoke() else onFailed?.invoke()
+        }
     }
 
     private fun showBackendSettingsDialog() {
@@ -3483,7 +3535,7 @@ class MainActivity : Activity() {
                         leftMargin = dp(8)
                     })
                     setOnClickListener {
-                        if (googleAccountEmail() == null) beginGoogleSignIn()
+                        if (googleAccountEmail() == null) beginGoogleSignIn { updateAccountUi() }
                     }
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -3559,6 +3611,12 @@ class MainActivity : Activity() {
         discoveredBackendBaseUrl?.let { return it }
         return DEFAULT_BACKEND_BASE_URL
     }
+
+    private fun requiresCloudLogin(baseUrl: String = backendBaseUrl()): Boolean =
+        runCatching {
+            val host = Uri.parse(normalizeBackendBaseUrl(baseUrl) ?: baseUrl).host.orEmpty().lowercase()
+            host == "wici.ai" || host.endsWith(".wici.ai")
+        }.getOrDefault(false)
 
     private fun saveBackendBaseUrl(value: String) {
         stopBackendDiscovery()
@@ -4301,9 +4359,7 @@ class MainActivity : Activity() {
         private const val PREFS_NAME = "android-album-demo"
         private const val PREF_REMOVED_CURATED_IDS = "removed_curated_photo_ids"
         private const val PREF_BACKEND_BASE_URL = "backend_base_url"
-        private const val PREF_GOOGLE_ACCOUNT_EMAIL = "google_account_email"
         private const val DEFAULT_BACKEND_BASE_URL = "http://app.wici.ai:54228"
-        private const val GOOGLE_OAUTH_CLIENT_ID = ""
         private const val NSD_BACKEND_SERVICE_TYPE = "_wici-backend._tcp."
         private const val NSD_DISCOVERY_TIMEOUT_MS = 3_000L
         private const val BACKEND_HEALTH_TIMEOUT_MS = 2_500
