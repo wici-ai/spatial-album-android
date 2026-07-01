@@ -1831,6 +1831,9 @@ class MainActivity : Activity() {
         val photo = currentViewerPhoto
         val photoId = photo?.photoId ?: photoIdForAsset(capture.assetName)
         val metrics = captureMetrics(capture)
+        val seedStats = dataUrlStats(capture.seedDataUrl)
+        val previewStats = dataUrlStats(capture.previewDataUrl)
+        val maskStats = dataUrlStats(capture.refineMaskDataUrl)
         val body = JSONObject()
             .put("ply", capture.assetName)
             .put("box", "android-album-demo")
@@ -1840,14 +1843,39 @@ class MainActivity : Activity() {
             .put("previewPng", capture.previewDataUrl)
             .put("refineMaskPng", capture.refineMaskDataUrl)
             .put("metrics", metrics)
+        var sourceStats: DataUrlStats? = null
         if (photo?.imported == true && photo.localUri != null) {
             body.put("sourceId", photoId)
-            body.put("source", localSourceDataUrl(photo))
+            val sourceDataUrl = localSourceDataUrl(photo)
+            sourceStats = dataUrlStats(sourceDataUrl)
+            body.put("source", sourceDataUrl)
             metrics.put("transportMode", "android-local-source-data-url+jpeg")
         } else {
             body.put("sourceId", "$photoId-original")
             sourcePathForAsset(capture.assetName)?.let { body.put("source", it) }
         }
+        val bodyChars = body.toString().length
+        metrics.put(
+            "difixTransport",
+            JSONObject()
+                .put("seedBytes", seedStats.bytes)
+                .put("seedMime", seedStats.mime)
+                .put("previewBytes", previewStats.bytes)
+                .put("previewMime", previewStats.mime)
+                .put("refineMaskBytes", maskStats.bytes)
+                .put("refineMaskMime", maskStats.mime)
+                .put("sourceBytes", sourceStats?.bytes ?: 0)
+                .put("sourceMime", sourceStats?.mime ?: "")
+                .put("bodyChars", bodyChars)
+                .put("seedPreviewSame", dataUrlPayload(capture.seedDataUrl) == dataUrlPayload(capture.previewDataUrl))
+        )
+        Log.i(
+            TAG,
+            "Difix request payload photoId=$photoId capture=${capture.width}x${capture.height} " +
+                "seed=${seedStats.bytes}B/${seedStats.mime} preview=${previewStats.bytes}B/${previewStats.mime} " +
+                "mask=${maskStats.bytes}B/${maskStats.mime} source=${sourceStats?.bytes ?: 0}B/${sourceStats?.mime ?: "-"} " +
+                "bodyChars=$bodyChars seedPreviewSame=${dataUrlPayload(capture.seedDataUrl) == dataUrlPayload(capture.previewDataUrl)}"
+        )
         return body
     }
 
@@ -2383,19 +2411,37 @@ class MainActivity : Activity() {
             ?: throw IllegalArgumentException("failed to decode image")
     }
 
+    private data class DataUrlStats(val mime: String, val bytes: Int)
+
+    private fun dataUrlPayload(value: String): String =
+        value.substringAfter(",", value)
+
+    private fun dataUrlStats(value: String): DataUrlStats {
+        val header = value.substringBefore(",", "")
+        val mime = header.removePrefix("data:").substringBefore(";").ifBlank { "unknown" }
+        val bytes = Base64.decode(dataUrlPayload(value), Base64.DEFAULT).size
+        return DataUrlStats(mime, bytes)
+    }
+
     private fun localSourceDataUrl(photo: AlbumPhoto): String {
         synchronized(localSourceDataUrlCache) {
             localSourceDataUrlCache[photo.photoId]?.let { return it }
         }
         val uri = photo.localUri ?: throw IllegalArgumentException("imported photo has no local URI")
-        val bitmap = decodeLocalBitmap(uri, DISPLAY_IMAGE_MAX_SIDE)
+        val bitmap = decodeLocalBitmap(uri, DIFIX_SOURCE_UPLOAD_MAX_SIDE)
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
-        val dataUrl = "data:image/jpeg;base64,${Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)}"
+        bitmap.compress(Bitmap.CompressFormat.JPEG, DIFIX_SOURCE_UPLOAD_JPEG_QUALITY, out)
+        val bytes = out.toByteArray()
+        bitmap.recycle()
+        val dataUrl = "data:image/jpeg;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
         synchronized(localSourceDataUrlCache) {
             localSourceDataUrlCache[photo.photoId] = dataUrl
         }
-        Log.i(TAG, "Local source encoded photoId=${photo.photoId} chars=${dataUrl.length} bitmap=${bitmap.width}x${bitmap.height}")
+        Log.i(
+            TAG,
+            "Local source encoded photoId=${photo.photoId} bytes=${bytes.size} chars=${dataUrl.length} " +
+                "maxSide=$DIFIX_SOURCE_UPLOAD_MAX_SIDE quality=$DIFIX_SOURCE_UPLOAD_JPEG_QUALITY"
+        )
         return dataUrl
     }
 
@@ -2885,5 +2931,7 @@ class MainActivity : Activity() {
         private const val DISPLAY_IMAGE_MAX_SIDE = 3200
         private const val PREVIEW_UPLOAD_MAX_SIDE = 1536
         private const val PREVIEW_UPLOAD_JPEG_QUALITY = 90
+        private const val DIFIX_SOURCE_UPLOAD_MAX_SIDE = PREVIEW_UPLOAD_MAX_SIDE
+        private const val DIFIX_SOURCE_UPLOAD_JPEG_QUALITY = PREVIEW_UPLOAD_JPEG_QUALITY
     }
 }

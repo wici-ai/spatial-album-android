@@ -2047,8 +2047,8 @@ class SplatRenderer(
             renderHeight = captureH,
             width = outW,
             height = outH,
-            seedDataUrl = bitmapDataUrl(seed, Bitmap.CompressFormat.JPEG, 86),
-            previewDataUrl = bitmapDataUrl(preview, Bitmap.CompressFormat.JPEG, 86),
+            seedDataUrl = bitmapDataUrl(seed, Bitmap.CompressFormat.JPEG, DIFIX_CAPTURE_JPEG_QUALITY),
+            previewDataUrl = bitmapDataUrl(preview, Bitmap.CompressFormat.JPEG, DIFIX_CAPTURE_JPEG_QUALITY),
             refineMaskDataUrl = bitmapDataUrl(refineMask, Bitmap.CompressFormat.PNG, 100),
             peripheralMaskDataUrl = bitmapDataUrl(peripheralMask, Bitmap.CompressFormat.PNG, 100),
             gapPx = gapPx,
@@ -2233,6 +2233,7 @@ class SplatRenderer(
         private const val FINAL_DILATION_PX = 5.0f
         private const val MASK_TOLERANCE = 8
         private const val RELEASE_MAX_SIDE = 960
+        private const val DIFIX_CAPTURE_JPEG_QUALITY = 90
         private const val NEAR_PLANE = 0.02f
         private const val FAR_PLANE = 500f
         private const val TWO_PI = (Math.PI * 2.0).toFloat()
