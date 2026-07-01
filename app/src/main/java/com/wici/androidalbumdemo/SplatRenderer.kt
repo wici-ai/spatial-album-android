@@ -81,6 +81,8 @@ class SplatRenderer(
     private var yaw = if (sourceCamera != null) 0f else 0.35f
     private var pitch = if (sourceCamera != null) 0f else -0.15f
     private var zoom = if (sourceCamera != null) SOURCE_REST_ZOOM else 1f
+    private var panX = 0f
+    private var panY = 0f
     private var contentMinX = 0f
     private var contentMinY = 0f
     private var contentMaxX = 1f
@@ -196,6 +198,26 @@ class SplatRenderer(
         if (!scale.isFinite() || scale <= 0f) return
         zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
         sortDirty = true
+    }
+
+    fun pan(dxPx: Float, dyPx: Float) {
+        if (!dxPx.isFinite() || !dyPx.isFinite() || viewportW <= 1 || viewportH <= 1) return
+        val focalPx = (abs(proj[5]) * viewportH.toFloat() * 0.5f).takeIf { it.isFinite() && it > 1f }
+            ?: viewportH.toFloat()
+        val unitsPerPx = currentCameraDistance() / focalPx
+        panX -= dxPx * unitsPerPx
+        panY += dyPx * unitsPerPx
+        sortDirty = true
+    }
+
+    fun resetView() {
+        yaw = if (sourceCamera != null || autoFitActive) 0f else 0.35f
+        pitch = if (sourceCamera != null || autoFitActive) 0f else -0.15f
+        zoom = if (sourceCamera != null || autoFitActive) SOURCE_REST_ZOOM else 1f
+        panX = 0f
+        panY = 0f
+        resetSortUploadState()
+        Log.i(TAG, "viewReset photoId=$photoId")
     }
 
     fun setInteractionActive(active: Boolean) {
@@ -372,7 +394,7 @@ class SplatRenderer(
         val eyeX = m.centerX + distance * sin(yaw) * cp
         val eyeY = m.centerY + distance * sin(pitch)
         val eyeZ = m.centerZ + distance * cos(yaw) * cp
-        Matrix.setLookAtM(view, 0, eyeX, eyeY, eyeZ, m.centerX, m.centerY, m.centerZ, 0f, 1f, 0f)
+        setLookAtWithPan(eyeX, eyeY, eyeZ, m.centerX, m.centerY, m.centerZ, 0f, 1f, 0f)
     }
 
     private fun updateSourceView() {
@@ -382,19 +404,7 @@ class SplatRenderer(
         val eyeX = distance * sin(yaw) * cp
         val eyeY = distance * sin(pitch)
         val eyeZ = targetZ - distance * cos(yaw) * cp
-        Matrix.setLookAtM(
-            view,
-            0,
-            eyeX,
-            eyeY,
-            eyeZ,
-            0f,
-            0f,
-            targetZ,
-            0f,
-            -1f,
-            0f
-        )
+        setLookAtWithPan(eyeX, eyeY, eyeZ, 0f, 0f, targetZ, 0f, -1f, 0f)
     }
 
     private fun updateAutoFitView(m: SplatModel) {
@@ -403,19 +413,69 @@ class SplatRenderer(
         val eyeX = m.centerX + distance * sin(yaw) * cp
         val eyeY = m.centerY + distance * sin(pitch)
         val eyeZ = m.centerZ - distance * cos(yaw) * cp
+        setLookAtWithPan(eyeX, eyeY, eyeZ, m.centerX, m.centerY, m.centerZ, 0f, -1f, 0f)
+    }
+
+    private fun setLookAtWithPan(
+        eyeX: Float,
+        eyeY: Float,
+        eyeZ: Float,
+        targetX: Float,
+        targetY: Float,
+        targetZ: Float,
+        upX: Float,
+        upY: Float,
+        upZ: Float
+    ) {
+        val fx = targetX - eyeX
+        val fy = targetY - eyeY
+        val fz = targetZ - eyeZ
+        val fLen = sqrt(fx * fx + fy * fy + fz * fz).takeIf { it.isFinite() && it > 1e-5f } ?: 1f
+        val fnx = fx / fLen
+        val fny = fy / fLen
+        val fnz = fz / fLen
+        var rx = fny * upZ - fnz * upY
+        var ry = fnz * upX - fnx * upZ
+        var rz = fnx * upY - fny * upX
+        val rLen = sqrt(rx * rx + ry * ry + rz * rz)
+        if (!rLen.isFinite() || rLen <= 1e-5f) {
+            rx = 1f
+            ry = 0f
+            rz = 0f
+        } else {
+            rx /= rLen
+            ry /= rLen
+            rz /= rLen
+        }
+        val ux = ry * fnz - rz * fny
+        val uy = rz * fnx - rx * fnz
+        val uz = rx * fny - ry * fnx
+        val ox = rx * panX + ux * panY
+        val oy = ry * panX + uy * panY
+        val oz = rz * panX + uz * panY
         Matrix.setLookAtM(
             view,
             0,
-            eyeX,
-            eyeY,
-            eyeZ,
-            m.centerX,
-            m.centerY,
-            m.centerZ,
-            0f,
-            -1f,
-            0f
+            eyeX + ox,
+            eyeY + oy,
+            eyeZ + oz,
+            targetX + ox,
+            targetY + oy,
+            targetZ + oz,
+            ux,
+            uy,
+            uz
         )
+    }
+
+    private fun currentCameraDistance(): Float {
+        val m = model
+        return when {
+            autoFitActive && m != null -> autoFitDistance(m) * zoom
+            sourceCamera != null -> SOURCE_LOOK_AT_Z * zoom
+            m != null -> m.radius * 2.6f * zoom
+            else -> SOURCE_LOOK_AT_Z * zoom
+        }.coerceAtLeast(0.001f)
     }
 
     private fun isSourceRestPose(): Boolean =
@@ -423,7 +483,9 @@ class SplatRenderer(
             sourceCamera != null &&
             abs(yaw) < SOURCE_REST_EPSILON &&
             abs(pitch) < SOURCE_REST_EPSILON &&
-            abs(zoom - SOURCE_REST_ZOOM) < SOURCE_REST_EPSILON
+            abs(zoom - SOURCE_REST_ZOOM) < SOURCE_REST_EPSILON &&
+            abs(panX) < SOURCE_REST_EPSILON &&
+            abs(panY) < SOURCE_REST_EPSILON
 
     private fun setSourceProjection(camera: SourceCamera) {
         val scale = min(
@@ -482,6 +544,8 @@ class SplatRenderer(
             yaw = 0f
             pitch = 0f
             zoom = SOURCE_REST_ZOOM
+            panX = 0f
+            panY = 0f
             setAutoFitProjection()
             resetSortUploadState()
             Log.w(
@@ -799,6 +863,8 @@ class SplatRenderer(
         yaw = 0f
         pitch = 0f
         zoom = SOURCE_REST_ZOOM
+        panX = 0f
+        panY = 0f
         cameraSafetyEvaluatedCount = 0
         if (viewportW > 1 && viewportH > 1) {
             setSourceProjection(camera)

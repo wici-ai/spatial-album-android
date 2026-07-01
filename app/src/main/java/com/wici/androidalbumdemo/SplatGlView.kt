@@ -59,6 +59,8 @@ class SplatGlView(
     private var lastX = 0f
     private var lastY = 0f
     private var lastPinchDistance = 0f
+    private var lastPinchCenterX = 0f
+    private var lastPinchCenterY = 0f
     private var pinching = false
 
     init {
@@ -91,6 +93,8 @@ class SplatGlView(
                 if (event.pointerCount >= 2) {
                     pinching = true
                     lastPinchDistance = pinchDistance(event)
+                    lastPinchCenterX = pinchCenterX(event)
+                    lastPinchCenterY = pinchCenterY(event)
                     Log.i(TOUCH_TAG, "pinchStart distance=${lastPinchDistance.toInt()}")
                 }
                 return true
@@ -99,12 +103,27 @@ class SplatGlView(
                 if (event.pointerCount >= 2) {
                     val distance = pinchDistance(event)
                     val previous = lastPinchDistance
+                    val centerX = pinchCenterX(event)
+                    val centerY = pinchCenterY(event)
+                    val centerDx = centerX - lastPinchCenterX
+                    val centerDy = centerY - lastPinchCenterY
                     if (pinching && previous > 1f && distance > 1f) {
-                        val scale = distance / previous
-                        queueEvent { splatRenderer.dolly(scale) }
+                        val distanceDelta = distance - previous
+                        val centerMove = sqrt(centerDx * centerDx + centerDy * centerDy)
+                        val zoomDominant = abs(distanceDelta) > centerMove * 0.5f && abs(distanceDelta) > 0.75f
+                        val panDominant = centerMove > 0.75f && centerMove >= abs(distanceDelta) * 0.35f
+                        if (zoomDominant) {
+                            val scale = distance / previous
+                            queueEvent { splatRenderer.dolly(scale) }
+                        }
+                        if (panDominant) {
+                            queueEvent { splatRenderer.pan(centerDx, centerDy) }
+                        }
                     }
                     pinching = true
                     lastPinchDistance = distance
+                    lastPinchCenterX = centerX
+                    lastPinchCenterY = centerY
                     return true
                 }
                 val x = event.x
@@ -138,15 +157,21 @@ class SplatGlView(
                     }
                     pinching = false
                     lastPinchDistance = 0f
+                    lastPinchCenterX = 0f
+                    lastPinchCenterY = 0f
                     Log.i(TOUCH_TAG, "pinchEnd")
                 } else if (event.pointerCount >= 3) {
                     lastPinchDistance = pinchDistance(event)
+                    lastPinchCenterX = pinchCenterX(event)
+                    lastPinchCenterY = pinchCenterY(event)
                 }
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 pinching = false
                 lastPinchDistance = 0f
+                lastPinchCenterX = 0f
+                lastPinchCenterY = 0f
                 queueEvent { splatRenderer.setInteractionActive(false) }
                 Log.i(TOUCH_TAG, "releaseIgnored reason=ACTION_CANCEL")
                 return true
@@ -176,12 +201,23 @@ class SplatGlView(
         splatRenderer.shutdown()
     }
 
+    fun resetView() {
+        interactionStarted()
+        queueEvent { splatRenderer.resetView() }
+    }
+
     private fun pinchDistance(event: MotionEvent): Float {
         if (event.pointerCount < 2) return 0f
         val dx = event.getX(0) - event.getX(1)
         val dy = event.getY(0) - event.getY(1)
         return sqrt(dx * dx + dy * dy)
     }
+
+    private fun pinchCenterX(event: MotionEvent): Float =
+        if (event.pointerCount >= 2) (event.getX(0) + event.getX(1)) * 0.5f else event.x
+
+    private fun pinchCenterY(event: MotionEvent): Float =
+        if (event.pointerCount >= 2) (event.getY(0) + event.getY(1)) * 0.5f else event.y
 
     private fun actionName(action: Int): String =
         when (action) {

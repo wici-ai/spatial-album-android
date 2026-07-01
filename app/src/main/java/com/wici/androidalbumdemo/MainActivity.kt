@@ -2104,6 +2104,17 @@ class MainActivity : Activity() {
                 leftMargin = dp(18)
             }
         )
+        root.addView(
+            viewerResetButton(viewer),
+            FrameLayout.LayoutParams(
+                dp(78),
+                dp(44),
+                Gravity.END or Gravity.TOP
+            ).apply {
+                topMargin = dp(26)
+                rightMargin = dp(18)
+            }
+        )
         if (SHOW_RENDER_DEBUG) {
             root.addView(
                 renderStatus,
@@ -3742,6 +3753,25 @@ class MainActivity : Activity() {
             background = rounded(COLOR_SURFACE, dp(22).toFloat())
             applySoftShadow(this, 3)
             setOnClickListener { showAlbum() }
+        }
+
+    private fun viewerResetButton(viewer: SplatGlView): TextView =
+        TextView(this).apply {
+            text = "Reset"
+            textSize = 13f
+            typeface = inter(650)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setTextColor(COLOR_INK)
+            contentDescription = "Reset view"
+            isClickable = true
+            isFocusable = true
+            background = roundedState(COLOR_SURFACE, 0xFFF6F7FA.toInt(), dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            applySoftShadow(this, 3)
+            setOnClickListener {
+                beginLiveOrbit()
+                viewer.resetView()
+            }
         }
 
     private fun primaryGenerateButton(): LinearLayout =
