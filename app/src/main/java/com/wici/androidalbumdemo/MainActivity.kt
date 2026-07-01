@@ -183,37 +183,50 @@ class MainActivity : Activity() {
             }
         }
         val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
             setPadding(0, dp(2), 0, dp(18))
         }
-        val headerCopy = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        headerCopy.addView(
+        titleRow.addView(
             TextView(this).apply {
                 text = "Spatial Album"
                 setTextColor(COLOR_INK)
                 textSize = 32f
                 typeface = spaceGrotesk(700)
                 isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
             },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(12)
+            }
         )
+        val settingsButton = GearButton(this).apply {
+            contentDescription = "Backend settings"
+            isClickable = true
+            isFocusable = true
+            background = rounded(COLOR_SURFACE, dp(22).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+            applySoftShadow(this, 2)
+            setOnClickListener { showBackendSettingsDialog() }
+        }
+        titleRow.addView(settingsButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+        header.addView(titleRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        val metaRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, 0)
+        }
         albumStatus = TextView(this).apply {
             text = if (albumPhotos.isEmpty()) "LOADING PHOTOS" else momentCountText()
             setTextColor(COLOR_INK_SOFT)
             textSize = 11f
             typeface = inter(600)
             includeFontPadding = false
-            setPadding(0, dp(4), 0, 0)
         }
-        headerCopy.addView(albumStatus, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        header.addView(headerCopy, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        metaRow.addView(albumStatus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val previewToggle = TextView(this).apply {
             text = "3D Preview"
@@ -232,27 +245,8 @@ class MainActivity : Activity() {
         }
         stylePreviewToggle(previewToggle, false)
         albumActionButton = previewToggle
-        val settingsButton = TextView(this).apply {
-            text = "Settings"
-            textSize = 12f
-            typeface = inter(600)
-            includeFontPadding = false
-            gravity = Gravity.CENTER
-            minHeight = dp(38)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Backend settings"
-            setOnClickListener { showBackendSettingsDialog() }
-        }
-        styleSettingsButton(settingsButton)
-        header.addView(
-            settingsButton,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)).apply {
-                rightMargin = dp(8)
-            }
-        )
-        header.addView(previewToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
+        metaRow.addView(previewToggle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
+        header.addView(metaRow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val adapter = AlbumGridAdapter()
@@ -2724,12 +2718,6 @@ class MainActivity : Activity() {
         applySoftShadow(view, if (enabled) 3 else 2)
     }
 
-    private fun styleSettingsButton(view: TextView) {
-        view.setTextColor(COLOR_INK_SOFT)
-        view.background = rounded(COLOR_SURFACE, dp(19).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
-        applySoftShadow(view, 2)
-    }
-
     private fun showBackendSettingsDialog() {
         val input = EditText(this).apply {
             setSingleLine(true)
@@ -3155,6 +3143,34 @@ class MainActivity : Activity() {
         RAW,
         DIFIX,
         FLUX
+    }
+
+    private class GearButton(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = COLOR_INK_SOFT
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val density = resources.displayMetrics.density
+            val cx = width / 2f
+            val cy = height / 2f
+            paint.strokeWidth = 1.7f * density
+            val bodyRadius = 7.3f * density
+            val toothInner = 10.0f * density
+            val toothOuter = 12.2f * density
+            for (i in 0 until 8) {
+                canvas.save()
+                canvas.rotate(i * 45f, cx, cy)
+                canvas.drawLine(cx, cy - toothInner, cx, cy - toothOuter, paint)
+                canvas.restore()
+            }
+            canvas.drawCircle(cx, cy, bodyRadius, paint)
+            canvas.drawCircle(cx, cy, 2.8f * density, paint)
+        }
     }
 
     private class ChevronButton(context: Context) : View(context) {
