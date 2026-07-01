@@ -2924,7 +2924,7 @@ class MainActivity : Activity() {
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(22), dp(24), dp(16))
+            setPadding(dp(22), dp(18), dp(22), dp(14))
             addView(
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -2959,7 +2959,7 @@ class MainActivity : Activity() {
             addView(
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(0, dp(18), 0, dp(8))
+                    setPadding(0, dp(10), 0, dp(4))
                     statusLine = TextView(this@MainActivity).apply {
                         setTextColor(COLOR_INK_SOFT)
                         textSize = 13f
@@ -2973,7 +2973,7 @@ class MainActivity : Activity() {
                         includeFontPadding = false
                         ellipsize = TextUtils.TruncateAt.MIDDLE
                         setSingleLine(true)
-                        setPadding(0, dp(6), 0, 0)
+                        setPadding(0, dp(4), 0, 0)
                     }
                     addView(statusLine, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                     addView(statusAddress, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -2992,7 +2992,7 @@ class MainActivity : Activity() {
                 }
             }
             addView(automaticRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(8)
+                topMargin = dp(6)
             })
 
             manualMark = TextView(this@MainActivity)
@@ -3010,7 +3010,7 @@ class MainActivity : Activity() {
             addView(manualRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             manualFieldGroup = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(34), dp(4), 0, dp(4))
+                setPadding(dp(34), dp(3), 0, 0)
                 addView(
                     TextView(this@MainActivity).apply {
                         text = "Server address"
@@ -3023,10 +3023,19 @@ class MainActivity : Activity() {
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
                 addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply {
-                    topMargin = dp(8)
+                    topMargin = dp(6)
                 })
             }
             addView(manualFieldGroup, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(
+                View(this@MainActivity).apply {
+                    setBackgroundColor(0x80E2E4E8.toInt())
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
+                    topMargin = dp(10)
+                    bottomMargin = dp(12)
+                }
+            )
             addView(
                 TextView(this@MainActivity).apply {
                     text = "Account"
@@ -3034,7 +3043,7 @@ class MainActivity : Activity() {
                     textSize = 14f
                     typeface = inter(650)
                     includeFontPadding = false
-                    setPadding(0, dp(22), 0, dp(10))
+                    setPadding(0, 0, 0, dp(8))
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
@@ -3042,22 +3051,19 @@ class MainActivity : Activity() {
                 LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(6), 0, dp(8))
+                    setPadding(0, dp(3), 0, dp(5))
                     isClickable = true
                     isFocusable = true
                     background = roundedState(Color.TRANSPARENT, 0x08000000, dp(8).toFloat())
                     addView(
-                        TextView(this@MainActivity).apply {
-                            text = "G"
-                            setTextColor(COLOR_INK)
-                            textSize = 15f
-                            typeface = inter(800)
-                            includeFontPadding = false
-                            gravity = Gravity.CENTER
-                            background = rounded(COLOR_SURFACE, dp(15).toFloat(), dpFloat(1f), COLOR_HAIRLINE)
+                        ImageView(this@MainActivity).apply {
+                            setImageResource(R.drawable.ic_google_g)
+                            contentDescription = "Google"
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            setPadding(dp(2), dp(2), dp(2), dp(2))
                         },
-                        LinearLayout.LayoutParams(dp(30), dp(30)).apply {
-                            rightMargin = dp(12)
+                        LinearLayout.LayoutParams(dp(24), dp(24)).apply {
+                            rightMargin = dp(10)
                         }
                     )
                     addView(
@@ -3076,7 +3082,7 @@ class MainActivity : Activity() {
                                 textSize = 12f
                                 typeface = inter(500)
                                 includeFontPadding = false
-                                setPadding(0, dp(5), 0, 0)
+                                setPadding(0, dp(3), 0, 0)
                             }
                             addView(accountTitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                             addView(accountDetail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -3115,7 +3121,7 @@ class MainActivity : Activity() {
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
-            setPadding(0, dp(12), 0, 0)
+            setPadding(0, dp(10), 0, 0)
             addView(
                 dialogActionText("Cancel", COLOR_INK_SOFT).apply {
                     setOnClickListener { dialog.dismiss() }
