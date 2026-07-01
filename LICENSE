@@ -1,16 +1,53 @@
-MIT License
+Spatial Album License and Non-Commercial Model Notice
+
+Draft for legal review only. This is not legal advice. This notice reflects the
+upstream model and backend component license terms identified as of this commit.
+
+IMPORTANT: NON-COMMERCIAL / RESEARCH-ONLY PRODUCT CONSTRAINT
+
+The Spatial Album Android app source code in this repository is licensed under
+the MIT License below, but the functioning Spatial Album product depends on
+third-party AI models and backend components that are not MIT-licensed and that
+include non-commercial, research-only, evaluation-only, and/or non-production
+restrictions.
+
+In particular, the hosted or self-hosted Spatial Album backend uses or is
+designed to use:
+
+- Apple SHARP / apple/ml-sharp model weights, licensed for Apple Machine
+  Learning Research Model research purposes only.
+- NVIDIA Difix / Difix3D / nvidia/difix_ref, governed by NVIDIA terms that
+  restrict use to non-commercial research or evaluation.
+- Black Forest Labs FLUX.1 Fill [dev], governed by the FLUX.1 [dev]
+  Non-Commercial License.
+
+Therefore, use of Spatial Album as an end-to-end product, including any hosted
+demo backend or a self-hosted backend using these models, is limited to
+non-commercial research, evaluation, and demo purposes unless the operator has
+separately obtained all commercial rights required from the upstream model
+owners or replaced the restricted components with commercially usable
+alternatives.
+
+This MIT license does not grant any rights to third-party model weights,
+checkpoints, APIs, datasets, names, trademarks, generated content policies, or
+other third-party materials. Those materials remain governed by their own
+licenses. See THIRD_PARTY_LICENSES.md for the current factual license inventory
+and key restrictions.
+
+MIT License for WiCi-authored source code
 
 Copyright (c) 2026 wici-ai
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+of the WiCi-authored source code and documentation in this repository (the
+"Software"), to deal in the Software without restriction, including without
+limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom
+the Software is furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+The above copyright notice, this permission notice, and the non-commercial
+third-party model notice above shall be included in all copies or substantial
+portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

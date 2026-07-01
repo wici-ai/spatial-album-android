@@ -43,4 +43,10 @@ The public APK points at a hosted demo backend so anyone can try the app without
 
 ## License
 
-MIT
+WiCi-authored source code is provided under MIT terms, but the working product
+depends on third-party AI models with non-commercial / research-only /
+evaluation-only restrictions. The Spatial Album product and backend should be
+treated as non-commercial research/evaluation/demo software unless the operator
+obtains separate commercial rights or replaces the restricted model components.
+
+See [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
