@@ -230,7 +230,8 @@ class SplatRenderer(
             val zoomFraction = 1f - scale.pow(-WEB_ZOOM_SPEED)
             val distance = SOURCE_LOOK_AT_Z * zoom
             val nextDistance = distance - PAN_GAIN * foregroundDistance * zoomFraction
-            zoom = (nextDistance / SOURCE_LOOK_AT_Z).coerceIn(MIN_ZOOM, MAX_ZOOM)
+            val (minZoom, maxZoom) = sourceZoomBoundsForForeground(foregroundDistance)
+            zoom = (nextDistance / SOURCE_LOOK_AT_Z).coerceIn(minZoom, maxZoom)
         } else {
             zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
         }
@@ -672,6 +673,22 @@ class SplatRenderer(
     private fun updateForegroundPanDepth(m: SplatModel, metrics: DepthMetrics) {
         foregroundPanDepth = metrics.p5.coerceAtLeast(MIN_FOREGROUND_PAN_DISTANCE)
         foregroundPanDepthCount = m.count
+    }
+
+    private fun sourceZoomBoundsForForeground(foregroundDistance: Float): Pair<Float, Float> {
+        val foreground = foregroundDistance.coerceAtLeast(MIN_FOREGROUND_PAN_DISTANCE)
+        val minForegroundDepthFromCamera =
+            (foreground / SOURCE_ZOOM_MAX_MAGNIFICATION).coerceAtLeast(SOURCE_ZOOM_MIN_DEPTH_FROM_CAMERA)
+        val maxForegroundDepthFromCamera = foreground / SOURCE_ZOOM_MIN_MAGNIFICATION
+        val maxEyeZ = foreground - minForegroundDepthFromCamera
+        val minEyeZ = foreground - maxForegroundDepthFromCamera
+        val minZoom = (SOURCE_LOOK_AT_Z - maxEyeZ).coerceAtLeast(SOURCE_ZOOM_ABSOLUTE_MIN)
+        val maxZoom = (SOURCE_LOOK_AT_Z - minEyeZ).coerceAtMost(SOURCE_ZOOM_ABSOLUTE_MAX)
+        return if (minZoom <= maxZoom) {
+            minZoom to maxZoom
+        } else {
+            SOURCE_REST_ZOOM to SOURCE_REST_ZOOM
+        }
     }
 
     private fun logPanMetrics(reason: String) {
@@ -2641,6 +2658,11 @@ class SplatRenderer(
         private const val SOURCE_REST_EPSILON = 0.001f
         private const val MIN_ZOOM = 0.18f
         private const val MAX_ZOOM = 1.85f
+        private const val SOURCE_ZOOM_MIN_MAGNIFICATION = 0.6f
+        private const val SOURCE_ZOOM_MAX_MAGNIFICATION = 1.8f
+        private const val SOURCE_ZOOM_MIN_DEPTH_FROM_CAMERA = 0.06f
+        private const val SOURCE_ZOOM_ABSOLUTE_MIN = 0.02f
+        private const val SOURCE_ZOOM_ABSOLUTE_MAX = 2.6f
         private const val AUTO_FIT_MARGIN = 1.18f
         private const val CAMERA_SAFETY_MIN_SPLATS = 4_096
         private const val CAMERA_SAFETY_MIN_VISIBLE_PX = 64f
