@@ -153,6 +153,7 @@ class SplatRenderer(
     private var firstStreamFrameLogged = false
     private var autoFitActive = false
     private var lastOrbitClampLogMs = 0L
+    private var lastPanMetricsLogMs = 0L
     private var cameraSafetyEvaluatedCount = 0
     private val pointScratch = FloatArray(4)
     private val viewPointScratch = FloatArray(4)
@@ -167,6 +168,17 @@ class SplatRenderer(
         val cy: Float,
         val exact: Boolean,
         val source: String
+    )
+
+    private data class PanMetrics(
+        val mode: String,
+        val centerX: Float,
+        val centerY: Float,
+        val centerZ: Float,
+        val distance: Float,
+        val focalPx: Float,
+        val unitsPerPx: Float,
+        val perceivedPan: Float
     )
 
     fun orbit(dx: Float, dy: Float) {
@@ -202,11 +214,15 @@ class SplatRenderer(
 
     fun pan(dxPx: Float, dyPx: Float) {
         if (!dxPx.isFinite() || !dyPx.isFinite() || viewportW <= 1 || viewportH <= 1) return
-        val focalPx = (abs(proj[5]) * viewportH.toFloat() * 0.5f).takeIf { it.isFinite() && it > 1f }
-            ?: viewportH.toFloat()
-        val unitsPerPx = currentCameraDistance() / focalPx
+        val metrics = panMetrics(model) ?: return
+        val unitsPerPx = metrics.unitsPerPx
         panX -= dxPx * unitsPerPx
         panY += dyPx * unitsPerPx
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPanMetricsLogMs > PAN_METRICS_LOG_INTERVAL_MS) {
+            lastPanMetricsLogMs = now
+            logPanMetrics("pan")
+        }
         sortDirty = true
     }
 
@@ -279,6 +295,7 @@ class SplatRenderer(
                     "surfaceCreatedRetained photoId=$streamId count=${retainedModel.count} " +
                         "streamComplete=$streamComplete expected=$streamExpectedCount"
                 )
+                logPanMetrics("surface-retained")
             } else {
                 model = emptyModel(assetName)
                 sortDirty = true
@@ -296,6 +313,7 @@ class SplatRenderer(
                 sortDirty = true
                 status("Restored ${retainedModel.assetName}: ${retainedModel.count} splats")
                 Log.i(TAG, "surfaceCreatedRetained asset=$assetName count=${retainedModel.count}")
+                logPanMetrics("surface-retained")
             } else {
                 val start = SystemClock.elapsedRealtime()
                 model = PlyLoader.loadAsset(context, assetName)
@@ -303,6 +321,7 @@ class SplatRenderer(
                 val m = requireNotNull(model)
                 sortDirty = true
                 status("Loaded ${m.assetName}: ${m.count} splats, invalid=${m.invalidValueCount}, ${elapsed}ms")
+                logPanMetrics("asset-loaded")
             }
         }
     }
@@ -328,6 +347,7 @@ class SplatRenderer(
         createFbo(viewportW, viewportH)
         createPostFbos(viewportW, viewportH)
         sortDirty = true
+        if (model != null) logPanMetrics("surface-changed")
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -563,6 +583,72 @@ class SplatRenderer(
 
     private fun sourceLikeFocalPx(): Float =
         (SOURCE_FOCAL_PER_MIN_SIDE * min(viewportW, viewportH).toFloat()).coerceAtLeast(1f)
+
+    private fun panFocalPx(): Float =
+        (abs(proj[5]) * viewportH.toFloat() * 0.5f).takeIf { it.isFinite() && it > 1f }
+            ?: viewportH.toFloat().coerceAtLeast(1f)
+
+    private fun cameraToSceneCenterDistance(m: SplatModel): Float {
+        if (!sourceCameraPresent()) {
+            return currentCameraDistance()
+        }
+        val targetZ = SOURCE_LOOK_AT_Z
+        val distance = targetZ * zoom
+        val cp = cos(pitch)
+        val eyeX = distance * sin(yaw) * cp
+        val eyeY = distance * sin(pitch)
+        val eyeZ = targetZ - distance * cos(yaw) * cp
+        val dx = eyeX - m.centerX
+        val dy = eyeY - m.centerY
+        val dz = eyeZ - m.centerZ
+        return sqrt(dx * dx + dy * dy + dz * dz).takeIf { it.isFinite() && it > 1e-4f }
+            ?: currentCameraDistance()
+    }
+
+    private fun sourceCameraPresent(): Boolean =
+        !autoFitActive && sourceCamera != null
+
+    private fun panMetrics(m: SplatModel?): PanMetrics? {
+        val model = m?.takeIf { it.count > 0 } ?: return null
+        val focalPx = panFocalPx()
+        val distance = cameraToSceneCenterDistance(model)
+        val unitsPerPx = PAN_GAIN * distance / focalPx
+        val perceivedPan = unitsPerPx * focalPx / distance
+        val mode = when {
+            autoFitActive -> "autoFit"
+            sourceCamera != null -> "source"
+            else -> "bare"
+        }
+        return PanMetrics(
+            mode = mode,
+            centerX = model.centerX,
+            centerY = model.centerY,
+            centerZ = model.centerZ,
+            distance = distance,
+            focalPx = focalPx,
+            unitsPerPx = unitsPerPx,
+            perceivedPan = perceivedPan
+        )
+    }
+
+    private fun logPanMetrics(reason: String) {
+        val metrics = panMetrics(model) ?: return
+        Log.i(
+            TAG,
+            ("panMetrics reason=$reason photoId=$photoId mode=${metrics.mode} " +
+                "sceneCenter=(%.3f,%.3f,%.3f) D=%.3f focalPx=%.1f unitsPerPx=%.7f " +
+                "PAN_GAIN=%.5f perceivedPan=%.5f").format(
+                metrics.centerX,
+                metrics.centerY,
+                metrics.centerZ,
+                metrics.distance,
+                metrics.focalPx,
+                metrics.unitsPerPx,
+                PAN_GAIN,
+                metrics.perceivedPan
+            )
+        )
+    }
 
     private fun interactionProjectionLog(): String {
         val focalPx = abs(proj[5]) * viewportH.toFloat() * 0.5f
@@ -992,6 +1078,7 @@ class SplatRenderer(
             firstStreamFrameLogged = true
             val elapsed = SystemClock.elapsedRealtime() - streamStartMs
             Log.i(TAG, "streamCompleteApplied photoId=$photoId loaded=${model?.count ?: 0} elapsedMs=$elapsed")
+            logPanMetrics("stream-complete")
         }
     }
 
@@ -2421,6 +2508,8 @@ class SplatRenderer(
         private const val TWO_PI = (Math.PI * 2.0).toFloat()
         private const val WEB_ROTATE_SPEED = 0.42f
         private const val WEB_ZOOM_SPEED = 0.55f
+        private const val PAN_GAIN = 0.095f
+        private const val PAN_METRICS_LOG_INTERVAL_MS = 500L
         private const val WEB_AZIMUTH_LIMIT_DEG = 20f
         private const val WEB_POLAR_LIMIT_DEG = 12f
         private val WEB_AZIMUTH_LIMIT_RAD = Math.toRadians(WEB_AZIMUTH_LIMIT_DEG.toDouble()).toFloat()
