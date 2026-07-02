@@ -145,6 +145,9 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         applyIntentOverrides(intent)
+        if (applyDebugViewerIntent(intent)) {
+            return
+        }
         if (showViewerFromIntent(intent)) {
             Log.i(TAG, "Direct viewer intent handled while activity was alive")
         } else {
@@ -168,6 +171,19 @@ class MainActivity : Activity() {
         } else {
             null
         }
+    }
+
+    private fun applyDebugViewerIntent(intent: Intent): Boolean {
+        if (!intent.hasExtra("debugPanPx")) return false
+        val dxPx = intent.getFloatExtra("debugPanPx", Float.NaN)
+        val viewer = glView
+        if (!dxPx.isFinite() || viewer == null) {
+            Log.w(TAG, "debugPanIgnored dxPx=$dxPx viewerPresent=${viewer != null}")
+            return true
+        }
+        viewer.debugInjectPan(dxPx, 0f)
+        Log.i(TAG, "debugPanIntent dxPx=$dxPx")
+        return true
     }
 
     private fun showViewerFromIntent(intent: Intent): Boolean {

@@ -154,6 +154,9 @@ class SplatRenderer(
     private var autoFitActive = false
     private var lastOrbitClampLogMs = 0L
     private var lastPanMetricsLogMs = 0L
+    private var depthMetricsLoggedCount = 0
+    private var foregroundPanDepth = Float.NaN
+    private var foregroundPanDepthCount = 0
     private var cameraSafetyEvaluatedCount = 0
     private val pointScratch = FloatArray(4)
     private val viewPointScratch = FloatArray(4)
@@ -175,10 +178,19 @@ class SplatRenderer(
         val centerX: Float,
         val centerY: Float,
         val centerZ: Float,
-        val distance: Float,
+        val centerDistance: Float,
+        val foregroundDistance: Float,
         val focalPx: Float,
         val unitsPerPx: Float,
         val perceivedPan: Float
+    )
+
+    private data class DepthMetrics(
+        val inFrustumCount: Int,
+        val p5: Float,
+        val p10: Float,
+        val p50: Float,
+        val p90: Float
     )
 
     fun orbit(dx: Float, dy: Float) {
@@ -355,6 +367,7 @@ class SplatRenderer(
         applyPendingStreamBatches()
         val m = model ?: return
         updateView(m)
+        logDepthMetricsIfReady(m)
 
         uploadPendingSort()
         if (m.count > 0 && !hasUploadedInstances) {
@@ -611,9 +624,10 @@ class SplatRenderer(
     private fun panMetrics(m: SplatModel?): PanMetrics? {
         val model = m?.takeIf { it.count > 0 } ?: return null
         val focalPx = panFocalPx()
-        val distance = cameraToSceneCenterDistance(model)
-        val unitsPerPx = PAN_GAIN * distance / focalPx
-        val perceivedPan = unitsPerPx * focalPx / distance
+        val centerDistance = cameraToSceneCenterDistance(model)
+        val foregroundDistance = foregroundPanDistance(model, centerDistance)
+        val unitsPerPx = PAN_GAIN * foregroundDistance / focalPx
+        val perceivedPan = unitsPerPx * focalPx / foregroundDistance
         val mode = when {
             autoFitActive -> "autoFit"
             sourceCamera != null -> "source"
@@ -624,11 +638,27 @@ class SplatRenderer(
             centerX = model.centerX,
             centerY = model.centerY,
             centerZ = model.centerZ,
-            distance = distance,
+            centerDistance = centerDistance,
+            foregroundDistance = foregroundDistance,
             focalPx = focalPx,
             unitsPerPx = unitsPerPx,
             perceivedPan = perceivedPan
         )
+    }
+
+    private fun foregroundPanDistance(m: SplatModel, fallback: Float): Float {
+        val cached = foregroundPanDepth
+        if (foregroundPanDepthCount == m.count && cached.isFinite() && cached > 0f) {
+            return cached
+        }
+        val metrics = computeViewDepthMetrics(m) ?: return fallback
+        updateForegroundPanDepth(m, metrics)
+        return foregroundPanDepth.takeIf { it.isFinite() && it > 0f } ?: fallback
+    }
+
+    private fun updateForegroundPanDepth(m: SplatModel, metrics: DepthMetrics) {
+        foregroundPanDepth = metrics.p5.coerceAtLeast(MIN_FOREGROUND_PAN_DISTANCE)
+        foregroundPanDepthCount = m.count
     }
 
     private fun logPanMetrics(reason: String) {
@@ -636,17 +666,92 @@ class SplatRenderer(
         Log.i(
             TAG,
             ("panMetrics reason=$reason photoId=$photoId mode=${metrics.mode} " +
-                "sceneCenter=(%.3f,%.3f,%.3f) D=%.3f focalPx=%.1f unitsPerPx=%.7f " +
+                "sceneCenter=(%.3f,%.3f,%.3f) centerD=%.3f foregroundD=%.3f focalPx=%.1f unitsPerPx=%.7f " +
                 "PAN_GAIN=%.5f perceivedPan=%.5f").format(
                 metrics.centerX,
                 metrics.centerY,
                 metrics.centerZ,
-                metrics.distance,
+                metrics.centerDistance,
+                metrics.foregroundDistance,
                 metrics.focalPx,
                 metrics.unitsPerPx,
                 PAN_GAIN,
                 metrics.perceivedPan
             )
+        )
+    }
+
+    private fun logDepthMetricsIfReady(m: SplatModel) {
+        if (m.count <= 0 || depthMetricsLoggedCount == m.count) return
+        val ready = if (streamPhotoId != null) streamComplete else true
+        if (!ready) return
+        depthMetricsLoggedCount = m.count
+        val metrics = computeViewDepthMetrics(m)
+        if (metrics == null) {
+            Log.w(TAG, "depthMetrics unavailable photoId=$photoId count=${m.count}")
+            return
+        }
+        updateForegroundPanDepth(m, metrics)
+        val pan = panMetrics(m)
+        if (pan == null) {
+            Log.w(TAG, "panMetrics unavailable photoId=$photoId count=${m.count}")
+            return
+        }
+        Log.i(
+            TAG,
+            ("depthMetrics reason=loaded photoId=$photoId count=${m.count} inFrustum=${metrics.inFrustumCount} " +
+                "p5=%.4f p10=%.4f p50=%.4f p90=%.4f centerD=%.4f foregroundD=%.4f focalPx=%.1f mode=${pan.mode}").format(
+                metrics.p5,
+                metrics.p10,
+                metrics.p50,
+                metrics.p90,
+                pan.centerDistance,
+                pan.foregroundDistance,
+                pan.focalPx
+            )
+        )
+    }
+
+    private fun computeViewDepthMetrics(m: SplatModel): DepthMetrics? {
+        if (m.count <= 0) return null
+        val depths = FloatArray(m.count)
+        var valid = 0
+        var p = 0
+        for (i in 0 until m.count) {
+            pointScratch[0] = m.centers[p]
+            pointScratch[1] = m.centers[p + 1]
+            pointScratch[2] = m.centers[p + 2]
+            pointScratch[3] = 1f
+            Matrix.multiplyMV(viewPointScratch, 0, view, 0, pointScratch, 0)
+            Matrix.multiplyMV(clipPointScratch, 0, proj, 0, viewPointScratch, 0)
+            val w = clipPointScratch[3]
+            if (w.isFinite() && w > NEAR_PLANE) {
+                val ndcX = clipPointScratch[0] / w
+                val ndcY = clipPointScratch[1] / w
+                val ndcZ = clipPointScratch[2] / w
+                if (
+                    ndcX.isFinite() && ndcY.isFinite() && ndcZ.isFinite() &&
+                    ndcX >= -1f && ndcX <= 1f &&
+                    ndcY >= -1f && ndcY <= 1f &&
+                    ndcZ >= -1f && ndcZ <= 1f
+                ) {
+                    depths[valid++] = w
+                }
+            }
+            p += 3
+        }
+        if (valid <= 0) return null
+        java.util.Arrays.sort(depths, 0, valid)
+        fun percentile(q: Float): Float {
+            val index = ((valid - 1) * q).toInt().coerceIn(0, valid - 1)
+            return depths[index]
+        }
+        return DepthMetrics(
+            inFrustumCount = valid,
+            p5 = percentile(0.05f),
+            p10 = percentile(0.10f),
+            p50 = percentile(0.50f),
+            p90 = percentile(0.90f)
         )
     }
 
@@ -2508,7 +2613,8 @@ class SplatRenderer(
         private const val TWO_PI = (Math.PI * 2.0).toFloat()
         private const val WEB_ROTATE_SPEED = 0.42f
         private const val WEB_ZOOM_SPEED = 0.55f
-        private const val PAN_GAIN = 0.095f
+        private const val PAN_GAIN = 2.762f
+        private const val MIN_FOREGROUND_PAN_DISTANCE = 0.35f
         private const val PAN_METRICS_LOG_INTERVAL_MS = 500L
         private const val WEB_AZIMUTH_LIMIT_DEG = 20f
         private const val WEB_POLAR_LIMIT_DEG = 12f

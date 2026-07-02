@@ -207,6 +207,15 @@ class SplatGlView(
         queueEvent { splatRenderer.resetView() }
     }
 
+    fun debugInjectPan(dxPx: Float, dyPx: Float = 0f) {
+        if (!dxPx.isFinite() || !dyPx.isFinite()) return
+        queueEvent {
+            splatRenderer.pan(dxPx, dyPx)
+            Log.i(TOUCH_TAG, "debugPanInjected dxPx=$dxPx dyPx=$dyPx")
+        }
+        requestRender()
+    }
+
     private fun pinchDistance(event: MotionEvent): Float {
         if (event.pointerCount < 2) return 0f
         val dx = event.getX(0) - event.getX(1)
