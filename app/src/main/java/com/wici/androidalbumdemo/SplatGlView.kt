@@ -65,6 +65,7 @@ class SplatGlView(
 
     init {
         setEGLContextClientVersion(3)
+        setPreserveEGLContextOnPause(true)
         setRenderer(splatRenderer)
         renderMode = RENDERMODE_CONTINUOUSLY
     }

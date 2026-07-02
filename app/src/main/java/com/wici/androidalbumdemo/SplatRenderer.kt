@@ -250,6 +250,10 @@ class SplatRenderer(
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        val retainedModel = model
+        resetGlResourceHandlesForContext()
+        resetSortUploadState()
+
         GLES30.glClearColor(0.949f, 0.953f, 0.961f, 1f)
         GLES30.glDisable(GLES30.GL_DEPTH_TEST)
         GLES30.glEnable(GLES30.GL_BLEND)
@@ -266,18 +270,40 @@ class SplatRenderer(
         lastStatusMs = SystemClock.elapsedRealtime()
         val streamId = streamPhotoId
         if (streamId != null) {
-            model = emptyModel(assetName)
-            sortDirty = true
-            streamStartMs = SystemClock.elapsedRealtime()
-            status("Streaming $streamId${experimentLabel()}...")
-            startSplatStream(streamId)
+            if (retainedModel != null && retainedModel.count > 0) {
+                model = retainedModel
+                sortDirty = true
+                status("Restored $streamId${experimentLabel()} ${retainedModel.count}/${streamExpectedCount.takeIf { it > 0 } ?: "?"}")
+                Log.i(
+                    TAG,
+                    "surfaceCreatedRetained photoId=$streamId count=${retainedModel.count} " +
+                        "streamComplete=$streamComplete expected=$streamExpectedCount"
+                )
+            } else {
+                model = emptyModel(assetName)
+                sortDirty = true
+                streamComplete = false
+                firstStreamFrameLogged = false
+                streamError = null
+                streamStartMs = SystemClock.elapsedRealtime()
+                status("Streaming $streamId${experimentLabel()}...")
+                Log.i(TAG, "surfaceCreatedStartStream photoId=$streamId retainedCount=${retainedModel?.count ?: 0}")
+                startSplatStream(streamId)
+            }
         } else {
-            val start = SystemClock.elapsedRealtime()
-            model = PlyLoader.loadAsset(context, assetName)
-            val elapsed = SystemClock.elapsedRealtime() - start
-            val m = requireNotNull(model)
-            sortDirty = true
-            status("Loaded ${m.assetName}: ${m.count} splats, invalid=${m.invalidValueCount}, ${elapsed}ms")
+            if (retainedModel != null && retainedModel.count > 0) {
+                model = retainedModel
+                sortDirty = true
+                status("Restored ${retainedModel.assetName}: ${retainedModel.count} splats")
+                Log.i(TAG, "surfaceCreatedRetained asset=$assetName count=${retainedModel.count}")
+            } else {
+                val start = SystemClock.elapsedRealtime()
+                model = PlyLoader.loadAsset(context, assetName)
+                val elapsed = SystemClock.elapsedRealtime() - start
+                val m = requireNotNull(model)
+                sortDirty = true
+                status("Loaded ${m.assetName}: ${m.count} splats, invalid=${m.invalidValueCount}, ${elapsed}ms")
+            }
         }
     }
 
@@ -596,6 +622,7 @@ class SplatRenderer(
         }
         hasUploadedInstances = false
         uploadedInstanceCount = 0
+        instanceCapacityBytes = 0
         lastSubmittedSortYaw = Float.NaN
         lastSubmittedSortPitch = Float.NaN
         lastUploadedSortYaw = Float.NaN
@@ -610,6 +637,25 @@ class SplatRenderer(
         lastSubmittedSortYaw = Float.NaN
         lastSubmittedSortPitch = Float.NaN
         sortDirty = true
+    }
+
+    private fun resetGlResourceHandlesForContext() {
+        splatProgram = 0
+        blitProgram = 0
+        rawBlitProgram = 0
+        downsampleProgram = 0
+        seedFillProgram = 0
+        pushFillProgram = 0
+        vao = 0
+        quadVbo = 0
+        instanceVbo = 0
+        fbo = 0
+        fboTex = 0
+        instanceCapacityBytes = 0
+        java.util.Arrays.fill(mipTex, 0)
+        java.util.Arrays.fill(mipFbo, 0)
+        java.util.Arrays.fill(fillTex, 0)
+        java.util.Arrays.fill(fillFbo, 0)
     }
 
     private fun checkRestProjection(m: SplatModel): ProjectionCheck {
