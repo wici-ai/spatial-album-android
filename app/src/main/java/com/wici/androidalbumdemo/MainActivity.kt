@@ -134,6 +134,25 @@ class MainActivity : Activity() {
         SupabaseAuth.init(this)
         removedCuratedPhotoIds.addAll(loadRemovedCuratedPhotoIds())
 
+        applyIntentOverrides(intent)
+        startBackendDiscoveryIfNeeded()
+        if (!showViewerFromIntent(intent)) {
+            showAlbum()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIntentOverrides(intent)
+        if (showViewerFromIntent(intent)) {
+            Log.i(TAG, "Direct viewer intent handled while activity was alive")
+        } else {
+            Log.i(TAG, "Launcher intent received; keeping current screen viewerVisible=$viewerVisible")
+        }
+    }
+
+    private fun applyIntentOverrides(intent: Intent) {
         releaseCaptureEnabled = !intent.getBooleanExtra("disableReleaseCapture", false)
         postPassEnabled = !intent.getBooleanExtra("disablePostPass", false)
         streamDensityOverride = intent.getStringExtra("streamDensity")
@@ -149,13 +168,15 @@ class MainActivity : Activity() {
         } else {
             null
         }
-        startBackendDiscoveryIfNeeded()
+    }
+
+    private fun showViewerFromIntent(intent: Intent): Boolean {
         val requestedAsset = intent.getStringExtra("asset")
         if (requestedAsset != null) {
             val requestedPhotoId = intent.getStringExtra("photoId")
                 ?.takeIf { it.isNotBlank() }
                 ?: photoIdForAsset(requestedAsset)
-            val dims = sourceDimsFromIntent() ?: legacySourceDims(requestedPhotoId)
+            val dims = sourceDimsFromIntent(intent) ?: legacySourceDims(requestedPhotoId)
             val photo = albumPhotos.firstOrNull { it.splatAsset == requestedAsset }
                 ?: AlbumPhoto(
                     photoId = requestedPhotoId,
@@ -164,17 +185,17 @@ class MainActivity : Activity() {
                     hasSplat = true,
                     sourceWidth = dims?.first,
                     sourceHeight = dims?.second,
-                    camFx = intentPositiveFloat("camFx"),
-                    camFy = intentPositiveFloat("camFy"),
-                    camCx = intentPositiveFloat("camCx"),
-                    camCy = intentPositiveFloat("camCy"),
+                    camFx = intentPositiveFloat(intent, "camFx"),
+                    camFy = intentPositiveFloat(intent, "camFy"),
+                    camCx = intentPositiveFloat(intent, "camCx"),
+                    camCy = intentPositiveFloat(intent, "camCy"),
                     sourceUrl = absoluteGalleryUrl("/source?photoId=${Uri.encode(requestedPhotoId)}"),
                     splatStreamUrl = absoluteGalleryUrl("/splat_stream?photoId=${Uri.encode(requestedPhotoId)}")
                 )
             showViewer(photo)
-        } else {
-            showAlbum()
+            return true
         }
+        return false
     }
 
     private fun showAlbum() {
@@ -4055,7 +4076,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun intentPositiveFloat(key: String): Float? =
+    private fun intentPositiveFloat(intent: Intent, key: String): Float? =
         if (intent.hasExtra(key)) {
             intent.getFloatExtra(key, Float.NaN).takeIf { it.isFinite() && it > 0f }
         } else {
@@ -4076,7 +4097,7 @@ class MainActivity : Activity() {
             checkSelfPermission(photoLibraryPermission()) == PackageManager.PERMISSION_GRANTED
         }
 
-    private fun sourceDimsFromIntent(): Pair<Int, Int>? {
+    private fun sourceDimsFromIntent(intent: Intent): Pair<Int, Int>? {
         val width = intent.getIntExtra("sourceWidth", 0).takeIf { it > 0 }
             ?: intent.getIntExtra("width", 0).takeIf { it > 0 }
         val height = intent.getIntExtra("sourceHeight", 0).takeIf { it > 0 }

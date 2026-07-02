@@ -153,6 +153,8 @@ class SplatRenderer(
     private var firstStreamFrameLogged = false
     private var autoFitActive = false
     private var lastOrbitClampLogMs = 0L
+    private var lastPanSensitivityLogMs = 0L
+    private var lastZoomSensitivityLogMs = 0L
     private var cameraSafetyEvaluatedCount = 0
     private val pointScratch = FloatArray(4)
     private val viewPointScratch = FloatArray(4)
@@ -196,7 +198,18 @@ class SplatRenderer(
 
     fun dolly(scale: Float) {
         if (!scale.isFinite() || scale <= 0f) return
-        zoom = (zoom / scale.pow(WEB_ZOOM_SPEED)).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        val sensitivity = sceneInteractionFactor()
+        val exponent = WEB_ZOOM_SPEED * sensitivity
+        zoom = (zoom / scale.pow(exponent)).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastZoomSensitivityLogMs > INTERACTION_SENSITIVITY_LOG_INTERVAL_MS) {
+            lastZoomSensitivityLogMs = now
+            Log.i(
+                TAG,
+                "interactionZoom photoId=$photoId scale=%.3f radius=%.3f rawFactor=%.3f factor=%.3f exponent=%.3f zoom=%.3f"
+                    .format(scale, interactionRadius(), rawSceneInteractionFactor(), sensitivity, exponent, zoom)
+            )
+        }
         sortDirty = true
     }
 
@@ -204,9 +217,20 @@ class SplatRenderer(
         if (!dxPx.isFinite() || !dyPx.isFinite() || viewportW <= 1 || viewportH <= 1) return
         val focalPx = (abs(proj[5]) * viewportH.toFloat() * 0.5f).takeIf { it.isFinite() && it > 1f }
             ?: viewportH.toFloat()
-        val unitsPerPx = currentCameraDistance() / focalPx
+        val baseUnitsPerPx = currentCameraDistance() / focalPx
+        val sensitivity = sceneInteractionFactor()
+        val unitsPerPx = baseUnitsPerPx * sensitivity
         panX -= dxPx * unitsPerPx
         panY += dyPx * unitsPerPx
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPanSensitivityLogMs > INTERACTION_SENSITIVITY_LOG_INTERVAL_MS) {
+            lastPanSensitivityLogMs = now
+            Log.i(
+                TAG,
+                "interactionPan photoId=$photoId dx=%.1f dy=%.1f radius=%.3f rawFactor=%.3f factor=%.3f baseUnitsPerPx=%.7f unitsPerPx=%.7f"
+                    .format(dxPx, dyPx, interactionRadius(), rawSceneInteractionFactor(), sensitivity, baseUnitsPerPx, unitsPerPx)
+            )
+        }
         sortDirty = true
     }
 
@@ -279,6 +303,7 @@ class SplatRenderer(
                     "surfaceCreatedRetained photoId=$streamId count=${retainedModel.count} " +
                         "streamComplete=$streamComplete expected=$streamExpectedCount"
                 )
+                logInteractionSensitivity("surface-retained")
             } else {
                 model = emptyModel(assetName)
                 sortDirty = true
@@ -296,6 +321,7 @@ class SplatRenderer(
                 sortDirty = true
                 status("Restored ${retainedModel.assetName}: ${retainedModel.count} splats")
                 Log.i(TAG, "surfaceCreatedRetained asset=$assetName count=${retainedModel.count}")
+                logInteractionSensitivity("surface-retained")
             } else {
                 val start = SystemClock.elapsedRealtime()
                 model = PlyLoader.loadAsset(context, assetName)
@@ -303,6 +329,7 @@ class SplatRenderer(
                 val m = requireNotNull(model)
                 sortDirty = true
                 status("Loaded ${m.assetName}: ${m.count} splats, invalid=${m.invalidValueCount}, ${elapsed}ms")
+                logInteractionSensitivity("asset-loaded")
             }
         }
     }
@@ -328,6 +355,7 @@ class SplatRenderer(
         createFbo(viewportW, viewportH)
         createPostFbos(viewportW, viewportH)
         sortDirty = true
+        if (model != null) logInteractionSensitivity("surface-changed")
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -574,6 +602,47 @@ class SplatRenderer(
             else -> "bare"
         }
         return "mode=$mode focalPx=%.1f hFov=%.1f vFov=%.1f".format(focalPx, hFov, vFov)
+    }
+
+    private fun interactionRadius(): Float {
+        val radius = model?.radius
+        return if (radius != null && radius.isFinite() && radius > 0f) radius else REFERENCE_INTERACTION_RADIUS
+    }
+
+    private fun rawSceneInteractionFactor(): Float =
+        REFERENCE_INTERACTION_RADIUS / interactionRadius()
+
+    private fun sceneInteractionFactor(): Float =
+        rawSceneInteractionFactor().coerceIn(MIN_SCENE_INTERACTION_FACTOR, MAX_SCENE_INTERACTION_FACTOR)
+
+    private fun logInteractionSensitivity(reason: String) {
+        val m = model ?: return
+        if (m.count <= 0) return
+        if (viewportW <= 1 || viewportH <= 1) return
+        val focalPx = (abs(proj[5]) * viewportH.toFloat() * 0.5f).takeIf { it.isFinite() && it > 1f }
+            ?: viewportH.toFloat()
+        val baseUnitsPerPx = currentCameraDistance() / focalPx
+        val rawFactor = rawSceneInteractionFactor()
+        val factor = sceneInteractionFactor()
+        val mode = when {
+            autoFitActive -> "autoFit"
+            sourceCamera != null -> "source"
+            else -> "bare"
+        }
+        Log.i(
+            TAG,
+            ("interactionSensitivity reason=$reason photoId=$photoId mode=$mode count=${m.count} " +
+                "radius=%.3f zExtent=%.3f rawFactor=%.3f factor=%.3f baseUnitsPerPx=%.7f " +
+                "panUnitsPerPx=%.7f zoomExponent=%.3f").format(
+                m.radius,
+                m.maxZ - m.minZ,
+                rawFactor,
+                factor,
+                baseUnitsPerPx,
+                baseUnitsPerPx * factor,
+                WEB_ZOOM_SPEED * factor
+            )
+        )
     }
 
     private fun maybeApplyCameraSafety(m: SplatModel) {
@@ -992,6 +1061,7 @@ class SplatRenderer(
             firstStreamFrameLogged = true
             val elapsed = SystemClock.elapsedRealtime() - streamStartMs
             Log.i(TAG, "streamCompleteApplied photoId=$photoId loaded=${model?.count ?: 0} elapsedMs=$elapsed")
+            logInteractionSensitivity("stream-complete")
         }
     }
 
@@ -2421,6 +2491,10 @@ class SplatRenderer(
         private const val TWO_PI = (Math.PI * 2.0).toFloat()
         private const val WEB_ROTATE_SPEED = 0.42f
         private const val WEB_ZOOM_SPEED = 0.55f
+        private const val REFERENCE_INTERACTION_RADIUS = 12.943395f
+        private const val MIN_SCENE_INTERACTION_FACTOR = 0.25f
+        private const val MAX_SCENE_INTERACTION_FACTOR = 1.6f
+        private const val INTERACTION_SENSITIVITY_LOG_INTERVAL_MS = 500L
         private const val WEB_AZIMUTH_LIMIT_DEG = 20f
         private const val WEB_POLAR_LIMIT_DEG = 12f
         private val WEB_AZIMUTH_LIMIT_RAD = Math.toRadians(WEB_AZIMUTH_LIMIT_DEG.toDouble()).toFloat()
